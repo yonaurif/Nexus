@@ -20,7 +20,8 @@ def models_dir() -> Path:
     return Path(env("NEXUS_MODELS_DIR") or BACKEND / "artifacts")
 
 
-def train_and_register(engine, seed_path: Path = SEED_PATH, include_feedback: bool = True):
+def train_and_register(engine, seed_path: Path = SEED_PATH, include_feedback: bool = True, encoder=None):
+    """encoder = el embedder del RAG (variante +enc); None = solo TF-IDF."""
     if not _training.acquire(blocking=False):
         raise Busy
     try:
@@ -28,7 +29,7 @@ def train_and_register(engine, seed_path: Path = SEED_PATH, include_feedback: bo
         if include_feedback:
             with engine.connect() as c:
                 ds = dataset.merge(ds, dataset.from_feedback(c))
-        result = intent.train(ds, models_dir())
+        result = intent.train(ds, models_dir(), encoder=encoder)
         with engine.begin() as c:
             model_id = registry.register(c, "intent_es", result)
         return model_id, result

@@ -23,7 +23,7 @@ def register(conn, task: str, result) -> str:
     conn.execute(sa.text(
         "INSERT INTO model_registry (id, task, version, dataset_version, metrics, threshold, artifact_path, "
         "artifact_sha256) VALUES (:i, :t, :v, :d, CAST(:m AS jsonb), :th, :p, :h)"),
-        {"i": model_id, "t": task, "v": f"{r['task']}:{r['dataset']['version'][7:19]}",
+        {"i": model_id, "t": task, "v": f"{r['task']}{r.get('variant', '')}:{r['dataset']['version'][7:19]}",
          "d": r["dataset"]["version"], "m": json.dumps(r), "th": r["threshold"],
          "p": result.artifact_path, "h": result.artifact_sha256})
     return model_id
@@ -67,7 +67,7 @@ def retire(conn, model_id: str) -> None:
     conn.execute(sa.text("UPDATE model_registry SET status='retired' WHERE id=:i"), {"i": model_id})
 
 
-def activate_intent(engine) -> bool:
+def activate_intent(engine, embedder=None) -> bool:
     """Carga en el clasificador el modelo de intención activo (si lo hay y su hash coincide)."""
     from nexus.core import classifier
     from nexus.learning import intent
@@ -78,7 +78,7 @@ def activate_intent(engine) -> bool:
         classifier.set_model(None)
         return False
     try:
-        classifier.set_model(intent.load(row.artifact_path, row.artifact_sha256))
+        classifier.set_model(intent.load(row.artifact_path, row.artifact_sha256, embedder))
         return True
     except Exception:  # artefacto ausente, manipulado o sin scikit-learn: se sigue con las reglas
         log.exception("no se pudo cargar el modelo de intención %s", row.version)

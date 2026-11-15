@@ -4,6 +4,9 @@ TF-IDF de palabras (1–2) + caracteres (2–5, robusto a faltas y variantes) ->
 pesos equilibrados. Umbral de abstención calibrado en validación; métricas en el test bloqueado;
 comparación con la línea base de reglas (classifier.rules_classify). Es una señal de enrutamiento,
 nunca una autorización (Doc 02 §4).
+
+T3 (variante "+enc"): a esas features se suman los embeddings del encoder multilingüe que ya usa el RAG
+(MiniLM, congelado). Medido con 463 ejemplos: test 0,844 -> 0,88 y 14 -> 17 de 20 sondas no vistas.
 """
 import hashlib
 import json
@@ -39,15 +42,52 @@ class IntentModel:
         return (str(self.pipeline.classes_[i]) if conf >= self.threshold else None), conf
 
 
-def _pipeline():
+class EncoderFeatures:
+    """Embeddings L2 del encoder como features densas. La sesión ONNX no se serializa: el artefacto solo
+    guarda nombre+versión del encoder y `load` inyecta uno idéntico (vectores de otro modelo = basura).
+    ponytail: encoder congelado (sin torch). Afinarlo solo si se queda corto con datos reales."""
+
+    def __init__(self, embedder):
+        self.embedder = embedder
+        self.encoder = {"name": embedder.model_name, "version": embedder.model_version}
+        self._cache: dict[str, list[float]] = {}
+
+    def fit(self, x, y=None):
+        return self
+
+    def transform(self, texts):
+        import numpy as np
+        from scipy.sparse import csr_matrix
+        missing = [t for t in dict.fromkeys(texts) if t not in self._cache]
+        if missing:
+            self._cache.update(zip(missing, self.embedder.embed(missing)))
+        return csr_matrix(np.array([self._cache[t] for t in texts]))
+
+    def get_params(self, deep=True):
+        return {}
+
+    def __sklearn_clone__(self):  # validación cruzada: comparte encoder y caché (no copia la sesión ONNX)
+        twin = EncoderFeatures(self.embedder)
+        twin._cache = self._cache
+        return twin
+
+    def __getstate__(self):
+        return {"encoder": self.encoder}
+
+    def __setstate__(self, state):
+        self.encoder, self.embedder, self._cache = state["encoder"], None, {}
+
+
+def _pipeline(encoder=None):
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import FeatureUnion, Pipeline
+    feats = [("word", TfidfVectorizer(analyzer="word", ngram_range=(1, 2), sublinear_tf=True)),
+             ("char", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), sublinear_tf=True))]
+    if encoder is not None:
+        feats.append(("encoder", EncoderFeatures(encoder)))
     return Pipeline([
-        ("features", FeatureUnion([
-            ("word", TfidfVectorizer(analyzer="word", ngram_range=(1, 2), sublinear_tf=True)),
-            ("char", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), sublinear_tf=True)),
-        ])),
+        ("features", FeatureUnion(feats)),
         ("clf", LogisticRegression(max_iter=3000, class_weight="balanced", C=10.0, random_state=0)),
     ])
 
@@ -61,10 +101,10 @@ def _metrics(y_true: list[str], y_pred: list[str]) -> dict:
             "confusion_matrix": confusion_matrix(y_true, y_pred, labels=LABELS).tolist()}
 
 
-def _cv(x: list[str], y: list[str]) -> dict:
+def _cv(x: list[str], y: list[str], encoder=None) -> dict:
     """5 particiones sobre train+validación: más estable que un test pequeño (no toca el test)."""
     from sklearn.model_selection import StratifiedKFold, cross_val_score
-    s = cross_val_score(_pipeline(), x, y, cv=StratifiedKFold(5, shuffle=True, random_state=0), scoring="f1_macro")
+    s = cross_val_score(_pipeline(encoder), x, y, cv=StratifiedKFold(5, shuffle=True, random_state=0), scoring="f1_macro")
     return {"folds": 5, "macro_f1_mean": round(float(s.mean()), 4), "macro_f1_std": round(float(s.std()), 4)}
 
 
@@ -83,14 +123,14 @@ def _choose_threshold(proba, classes, y_true) -> tuple[float, float, float]:
     return best
 
 
-def train(ds: Dataset, out_dir: str | Path) -> TrainResult:
+def train(ds: Dataset, out_dir: str | Path, encoder=None) -> TrainResult:
     import joblib
     from nexus.core.classifier import rules_classify
 
     parts = split(ds.examples)
     xs = {k: [e.text for e in v] for k, v in parts.items()}
     ys = {k: [e.label for e in v] for k, v in parts.items()}
-    pipe = _pipeline().fit(xs["train"], ys["train"])
+    pipe = _pipeline(encoder).fit(xs["train"], ys["train"])
     classes = list(pipe.classes_)
 
     threshold, val_cov, val_acc = _choose_threshold(pipe.predict_proba(xs["validation"]), classes, ys["validation"])
@@ -99,8 +139,13 @@ def train(ds: Dataset, out_dir: str | Path) -> TrainResult:
     test_pred = [classes[row.argmax()] for row in test_proba]
     accepted = [(p, y) for p, y, row in zip(test_pred, ys["test"], test_proba) if row.max() >= threshold]
     manifest = ds.manifest()
+    variant = "+enc" if encoder is not None else ""
+    model_info = {"features": "tfidf word(1,2) + char_wb(2,5)", "classifier": "LogisticRegression(C=10, balanced)"}
+    if encoder is not None:
+        model_info |= {"features": model_info["features"] + " + embeddings del encoder",
+                       "encoder": {"name": encoder.model_name, "version": encoder.model_version}}
     report = {
-        "task": "intent_es_v1", "dataset": manifest,
+        "task": "intent_es_v1", "variant": variant, "dataset": manifest,
         "splits": {k: len(v) for k, v in parts.items()},
         "threshold": threshold,
         "validation": {"coverage": round(val_cov, 3), "accepted_accuracy": round(val_acc, 3)},
@@ -112,12 +157,12 @@ def train(ds: Dataset, out_dir: str | Path) -> TrainResult:
                  "hybrid_macro_f1": _metrics(ys["test"], [classes[row.argmax()] if row.max() >= threshold
                                                           else rules_classify(x)
                                                           for row, x in zip(test_proba, xs["test"])])["macro_f1"]},
-        "cross_validation": _cv(xs["train"] + xs["validation"], ys["train"] + ys["validation"]),
-        "model": {"features": "tfidf word(1,2) + char_wb(2,5)", "classifier": "LogisticRegression(C=10, balanced)"},
+        "cross_validation": _cv(xs["train"] + xs["validation"], ys["train"] + ys["validation"], encoder),
+        "model": model_info,
     }
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    name = f"intent_es_v1-{manifest['version'][7:19]}"
+    name = f"intent_es_v1{variant.replace('+', '-')}-{manifest['version'][7:19]}"
     path = out / f"{name}.joblib"
     joblib.dump({"pipeline": pipe, "threshold": threshold, "version": name}, path)
     (out / f"{name}.report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -128,11 +173,18 @@ def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def load(path: str, expected_sha256: str) -> IntentModel:
+def load(path: str, expected_sha256: str, embedder=None) -> IntentModel:
     """joblib usa pickle: deserializar un archivo manipulado ejecuta código. Solo se carga si el hash
-    coincide con el registrado al entrenar."""
+    coincide con el registrado al entrenar. Variante +enc: necesita el MISMO encoder con que se entrenó."""
     if _sha256(Path(path)) != expected_sha256:
         raise ValueError("ARTIFACT_HASH_MISMATCH")
     import joblib
     blob = joblib.load(path)
+    for _name, step in blob["pipeline"].named_steps["features"].transformer_list:
+        if isinstance(step, EncoderFeatures):
+            if embedder is None:
+                raise ValueError("ENCODER_UNAVAILABLE")
+            if {"name": embedder.model_name, "version": embedder.model_version} != step.encoder:
+                raise ValueError("ENCODER_MISMATCH")
+            step.embedder = embedder
     return IntentModel(blob["pipeline"], blob["threshold"], blob["version"])

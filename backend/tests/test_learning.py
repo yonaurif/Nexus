@@ -114,13 +114,13 @@ def test_registry_promotion_and_classifier_integration(engine, trained):
     with engine.begin() as c:
         mid = registry.register(c, "intent_es", trained)
         assert registry.get(c, mid)["status"] == "candidate"
-        assert classifier.classify("¿qué sabes del NAS?") == "conversation"  # sin modelo activo: reglas
+        assert classifier.classify("ponme al corriente del proyecto Atlas") == "conversation"  # sin modelo: reglas
         registry.promote(c, mid)
         assert registry.get(c, mid)["status"] == "active"
     registry.activate_intent(engine)
     try:
         assert classifier.active_model() is not None
-        assert classifier.classify("¿qué sabes del NAS?") == "knowledge_query"
+        assert classifier.classify("ponme al corriente del proyecto Atlas") == "knowledge_query"
         assert classifier.classify("?!") == "unknown"
     finally:
         classifier.set_model(None)
@@ -157,3 +157,39 @@ def test_learning_api(engine, trained):
         classifier.set_model(None)
         with engine.begin() as c:
             registry.retire(c, mid)
+
+
+# --- T3: encoder multilingüe congelado + TF-IDF (TL §12, experimento controlado frente a T1) ---
+from tests.test_m1m2 import HashEmbedder  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def trained_enc(tmp_path_factory):
+    return intent.train(dataset.load(SEED), tmp_path_factory.mktemp("enc"), encoder=HashEmbedder())
+
+
+def test_encoder_variant_is_reported_and_named_apart(trained, trained_enc):
+    r = trained_enc.report
+    assert r["variant"] == "+enc" and r["model"]["encoder"] == {"name": "hash-bow", "version": "1"}
+    assert trained.report["variant"] == "" and "encoder" not in trained.report["model"]
+    assert trained_enc.artifact_path != trained.artifact_path
+    assert r["test"]["hybrid_macro_f1"] > r["test"]["baseline_rules_macro_f1"]
+
+
+def test_encoder_model_needs_the_same_encoder_to_load(trained_enc):
+    """El artefacto no lleva la sesión ONNX: el embedder se inyecta al cargar y debe ser el mismo."""
+    model = intent.load(trained_enc.artifact_path, trained_enc.artifact_sha256, embedder=HashEmbedder())
+    assert model.predict("según mis documentos, ¿qué presupuesto tiene Helios?")[0] == "knowledge_query"
+    with pytest.raises(ValueError, match="ENCODER_UNAVAILABLE"):
+        intent.load(trained_enc.artifact_path, trained_enc.artifact_sha256, embedder=None)
+    other = HashEmbedder()
+    other.model_version = "2"
+    with pytest.raises(ValueError, match="ENCODER_MISMATCH"):
+        intent.load(trained_enc.artifact_path, trained_enc.artifact_sha256, embedder=other)
+
+
+def test_registry_versions_distinguish_the_variant(engine, trained, trained_enc):
+    with engine.begin() as c:
+        a, b = registry.register(c, "intent_es_test", trained), registry.register(c, "intent_es_test", trained_enc)
+        va, vb = registry.get(c, a)["version"], registry.get(c, b)["version"]
+    assert vb == va.replace("intent_es_v1:", "intent_es_v1+enc:")

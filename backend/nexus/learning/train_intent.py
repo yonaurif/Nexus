@@ -1,10 +1,11 @@
 """Entrenamiento offline del clasificador de intención (Text Learning §5 pasos 9–14, §8).
 
-    python -m nexus.learning.train_intent [data/intent/intent_es_v1.jsonl] [--promote] [--no-feedback]
+    python -m nexus.learning.train_intent [data/intent/intent_es_v1.jsonl] [--promote] [--no-feedback] [--tfidf]
 
 Valida el dataset, entrena, evalúa en el test bloqueado contra la línea base de reglas, guarda el
 artefacto + informe en NEXUS_MODELS_DIR (por defecto backend/artifacts, fuera de git) y lo registra
-como CANDIDATO. Solo con --promote (decisión del propietario) pasa a activo, y solo si supera la base.
+como CANDIDATO. Con el encoder del RAG configurado entrena la variante +enc (T3); --tfidf la desactiva.
+Solo con --promote (decisión del propietario) pasa a activo, y solo si supera la base.
 """
 import sys
 from pathlib import Path
@@ -17,11 +18,15 @@ def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
     path = Path(args[0]) if args else service.SEED_PATH
     engine = get_engine()
-    model_id, result = service.train_and_register(engine, path, include_feedback="--no-feedback" not in argv)
+    from nexus.knowledge.embeddings import get_embedder
+    encoder = None if "--tfidf" in argv else get_embedder()
+    model_id, result = service.train_and_register(engine, path, include_feedback="--no-feedback" not in argv,
+                                                  encoder=encoder)
     rep, t = result.report, result.report["test"]
     m = rep["dataset"]
     print(f"dataset {path.name} + feedback: {m['examples']} ejemplos ({m['feedback_examples']} de tus correcciones), "
           f"{m['rejected']} rechazados, versión {m['version'][:19]}…")
+    print(f"variante {'TF-IDF + encoder ' + rep['model']['encoder']['name'] if encoder else 'TF-IDF'}")
     print(f"particiones {rep['splits']} · umbral de abstención {rep['threshold']}")
     cv = rep["cross_validation"]
     print(f"TEST  híbrido macro-F1 {t['hybrid_macro_f1']:.3f} · solo modelo {t['macro_f1']:.3f} · "

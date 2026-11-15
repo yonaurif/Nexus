@@ -79,7 +79,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         adapters = {**internal_tools.build_adapters(engine, embedder), **external_adapters}
     if start_scheduler:
         _start_sync_scheduler(engine, embedder)
-        registry.activate_intent(engine)  # IA propia promovida, si la hay; si no, reglas
+        registry.activate_intent(engine, embedder)  # IA propia promovida, si la hay; si no, reglas
 
     app = FastAPI(title="NEXUS API", version="0.2.0")
 
@@ -341,7 +341,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                                   "VALUES ('owner', :o, 'model.promoted', 'model', :m)"), {"o": owner, "m": model_id})
         except registry.RegistryError as e:
             raise HTTPException(404 if e.code == "MODEL_NOT_FOUND" else 409, e.code)
-        loaded = registry.activate_intent(engine)
+        loaded = registry.activate_intent(engine, embedder)
         return {"model_id": model_id, "status": "active", "loaded": loaded}
 
     # --- T5: correcciones del propietario -> revisión -> reentrenamiento (Text Learning §8) ---
@@ -393,7 +393,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         """Entrena offline en segundo plano y registra un CANDIDATO (nunca lo promueve)."""
         def job():
             try:
-                learning_service.train_and_register(engine)
+                learning_service.train_and_register(engine, encoder=embedder)
             except learning_service.Busy:
                 logging.getLogger("nexus.learning").info("entrenamiento ya en curso")
         bg.add_task(job)
