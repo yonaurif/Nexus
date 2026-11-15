@@ -16,7 +16,7 @@ from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTP
 from fastapi.responses import FileResponse, StreamingResponse
 
 from nexus.config import env
-from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, FeedbackIn, ChatRequest, CoreEvent, DocumentIn,
+from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, FactReview, FeedbackIn, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
 from nexus.core import approvals, classifier, hardware, pipeline, task_store
@@ -26,6 +26,7 @@ from nexus.gateway.registry import SqlToolRegistry
 from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
 from nexus.learning import registry
+from nexus.memory import facts
 from nexus.learning import service as learning_service
 from nexus.knowledge.sanitize import redact
 from nexus.memory import episodes
@@ -280,6 +281,23 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         return {"episodes": [EpisodeView(**{k: getattr(r, k) for k in EpisodeView.model_fields}) for r in rows]}
 
     # --- Conectores y herramientas (Doc 05 §13) ---
+    @app.get("/api/v1/memory/facts")
+    def list_memory_facts(status: str | None = None, owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return {"facts": facts.list_facts(c, owner, status)}
+
+    @app.post("/api/v1/memory/facts/{fact_id}/review")
+    def review_memory_fact(fact_id: str, body: FactReview, owner: str = Depends(auth)):
+        try:
+            with engine.begin() as c:
+                out = facts.review(c, owner, fact_id, body.decision, body.replace, reviewer=owner)
+                c.execute(sa.text("INSERT INTO audit_events (actor_type, actor_id, action, entity_type, entity_id) "
+                                  "VALUES ('owner', :o, :a, 'fact', :f)"),
+                          {"o": owner, "a": f"fact.{out['status']}", "f": fact_id})
+        except facts.FactError as e:
+            raise HTTPException(404 if e.code == "FACT_NOT_FOUND" else 409, e.code)
+        return out
+
     @app.get("/api/v1/connectors")
     def list_connectors(owner: str = Depends(auth)):
         with engine.connect() as c:

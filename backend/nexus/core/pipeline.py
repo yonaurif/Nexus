@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from nexus.contracts import Evidence
 from nexus.core import approvals, planner, task_store
 from nexus.knowledge import store as knowledge_store
-from nexus.memory import episodes
+from nexus.memory import episodes, facts
 from nexus.core.classifier import classify, strip_routing
 from nexus.core.executor import execute
 from nexus.core.models import SYSTEM_PROMPT
@@ -28,9 +28,15 @@ TOOL_RESULTS_MAX_CHARS = 4000
 PLANNED = {"task_request", "agent_request"}  # clases que pasan por el Planner con herramientas
 RAG_K = 5
 NOT_YET = {  # clase -> fase en la que se habilita
-    "memory_update": "M3", "rule_proposal": "motor de reglas",
-    "feedback": "T5", "system_admin": "G3",
+    "rule_proposal": "motor de reglas", "feedback": "T5", "system_admin": "G3",
 }
+SECRET_REPLY = ("No guardo contraseñas, claves ni tokens en la memoria. Si NEXUS necesita una credencial, "
+                "se configura en el servidor (.env), nunca en el chat.")
+
+
+class _Ref:  # fuente sin fragmento (un hecho de la memoria semántica)
+    def __init__(self, source_ref: str):
+        self.source_ref = source_ref
 
 
 class _Cancelled(Exception):
@@ -118,6 +124,43 @@ def _with_knowledge(messages: list[dict], hits) -> list[dict]:
     return messages[:-1] + [{"role": "system", "content": note}] + messages[-1:]
 
 
+def _with_facts(messages: list[dict], known: list[dict]) -> list[dict]:
+    """Doc 03 §6.1: solo hechos `confirmed`. Van como datos del propietario, no como instrucciones."""
+    lines = "\n".join(f"- {facts.render(f)}" for f in known)
+    note = ("Datos confirmados por el propietario (memoria de NEXUS). Son ciertos; úsalos cuando vengan al "
+            "caso y no los contradigas:\n" + lines)
+    return messages[:-1] + [{"role": "system", "content": note}] + messages[-1:]
+
+
+def _remember(engine, model, task_id, conversation_id, message, warnings, correlation_id) -> None:
+    """memory_update (Doc 03 §10): el modelo propone hechos, el código los valida y quedan `suggested`
+    hasta que el propietario los confirma. Respuesta en código: no hay nada que el LLM deba inventar."""
+    if facts.sensitive(message):  # Doc 03 §11: ningún secreto entra en la memoria
+        _step(engine, task_id, S.failed)
+        _reply(engine, task_id, conversation_id, SECRET_REPLY, warnings + ["SECRET_DETECTED"])
+        _episode(engine, task_id, conversation_id, "memory_update", "[mensaje con credencial omitido]",
+                 S.failed.value, correlation_id)
+        return
+    for st in (S.planning, S.plan_validating, S.queued, S.running):
+        _step(engine, task_id, st)
+    proposals = facts.extract(model, message)
+    with engine.begin() as c:
+        owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
+        saved = facts.propose(c, owner, proposals, source_ref=f"task:{task_id}", quote=message, task_id=task_id)
+    _step(engine, task_id, S.verifying)
+    lines = []
+    for f in saved:
+        lines.append(f"- {facts.render(f)}" + (" (ya lo tenía anotado)" if f["status"] == "confirmed" else ""))
+        lines += [f"  ⚠ contradice lo que confirmaste: {c}" for c in f["conflicts"]]
+    text = ("Lo anoto como sugerencia; lo usaré como dato cuando lo confirmes en la pestaña memoria:\n"
+            + "\n".join(lines))
+    now = datetime.now(timezone.utc)
+    _step(engine, task_id, S.completed)
+    _reply(engine, task_id, conversation_id, text, warnings,
+           [Evidence(source_ref=f"fact:{f['fact_id']}", retrieved_at=now) for f in saved])
+    _episode(engine, task_id, conversation_id, "memory_update", message, S.completed.value, correlation_id)
+
+
 def _episode(engine, task_id, conversation_id, label, message, status, correlation_id) -> None:
     with engine.begin() as c:
         owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
@@ -168,12 +211,24 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
             warnings.append("MODEL_NOT_CONFIGURED")
         if label in NOT_YET:
             warnings.append(f"CAPABILITY_UNAVAILABLE:{label} (fase {NOT_YET[label]})")
-        hits = []
+        if label == "memory_update":
+            _remember(engine, model, task_id, conversation_id, message, warnings, correlation_id)
+            return
+        with engine.connect() as c:
+            owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
+            known = facts.relevant(c, owner, message)
+        if known:
+            messages = _with_facts(messages, known)
+        # Un hecho confirmado sobre una entidad nombrada es evidencia (Doc 03 crit. 5); las preferencias del
+        # propietario se usan, pero no prueban nada sobre lo que se pregunta.
+        hits = [_Ref(f"fact:{f['fact_id']}") for f in known if not f["about_owner"]]
         if label == "knowledge_query":  # Context Builder + RAG (Doc 02 §5, Doc 03 §8)
             with engine.connect() as c:
-                owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
                 query = strip_routing(message)
-                hits = knowledge_store.filter_by_names(query, knowledge_store.search(c, owner, query, embedder, k=RAG_K))
+                docs = knowledge_store.filter_by_names(query, knowledge_store.search(c, owner, query, embedder, k=RAG_K))
+            if docs:
+                messages = _with_knowledge(messages, docs)
+            hits = hits + docs
             if not hits:
                 # Abstención en código, no en el prompt: medido que el LLM ignora "no inventes"
                 # y responde de memoria a "según mis documentos…" (Doc 02 §2.9, Doc 03 §8.4).
@@ -183,7 +238,6 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
                 _reply(engine, task_id, conversation_id, NO_EVIDENCE_REPLY, warnings + ["NO_EVIDENCE:knowledge"])
                 _episode(engine, task_id, conversation_id, label, message, S.needs_input.value, correlation_id)
                 return
-            messages = _with_knowledge(messages, hits)
 
         feedback, results, verdict = None, {}, Verdict("completed")
         for version in range(1, REPLAN_BUDGET + 2):

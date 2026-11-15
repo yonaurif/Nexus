@@ -13,7 +13,7 @@ RULES: list[tuple[RequestClass, str]] = [
     ("rule_proposal", r"\b(cada vez que|siempre que|nunca (?:hagas|permitas))\b"),
     ("memory_update", r"\b(recuerda que|guarda que|mi nombre es|prefiero)\b"),
     ("knowledge_query", r"\b(seg[uú]n (?:mis|los|tus) (?:documentos|notas)|en mis (?:documentos|notas)"
-                        r"|documentaci[oó]n|qu[eé] dice|busca en|qu[eé] sabes (?:de|sobre))\b"),
+                        r"|documentaci[oó]n|qu[eé] dice|busca en|qu[eé] sabes (?:del?|sobre))\b"),
     ("task_request", r"\b(recuérdame|recuerdame|programa|ejecuta|crea|envía|envia|haz"
                      r"|qu[eé] hora|qu[eé] d[ií]a|fecha de hoy)\b"),
     ("agent_request", r"\b(github|repositorios?|correos?|e-?mails?|youtube)\b"),
@@ -21,7 +21,7 @@ RULES: list[tuple[RequestClass, str]] = [
 
 ROUTING_PHRASES = re.compile(
     r"(?i)\b(seg[uú]n (?:mis|los|tus) (?:documentos|notas)|en mis (?:documentos|notas)"
-    r"|busca en (?:mis )?(?:documentos|notas)|qu[eé] sabes (?:de|sobre))\b[\s,:]*")
+    r"|busca en (?:mis )?(?:documentos|notas)|qu[eé] sabes (?:del?|sobre))\b[\s,:]*")
 
 _model = None  # IntentModel activo (nexus.learning.registry.activate_intent)
 

@@ -83,6 +83,11 @@ export type Feedback = {
   feedback_id: string; task_id: string; text: string; predicted_label: string | null; corrected_label: string;
   status: string; created_at: string;
 };
+export type Fact = {
+  fact_id: string; subject: string; predicate: string; object: string;
+  status: "suggested" | "confirmed" | "rejected" | "superseded" | "expired" | "deleted";
+  recorded_at: string; evidence: { source_ref: string; quote: string | null; created_at: string }[]; conflicts: string[];
+};
 export type ModelEntry = {
   id: string; version: string; status: "candidate" | "active" | "retired"; created_at: string; threshold: number;
   metrics: { dataset: { examples: number; feedback_examples?: number };
@@ -120,6 +125,9 @@ export const api = {
   feedbackList: (status = "pending") => call<{ feedback: Feedback[] }>(`/learning/feedback?status=${status}`),
   reviewFeedback: (id: string, decision: "approve" | "reject") =>
     call(`/learning/feedback/${id}/review`, { method: "POST", body: JSON.stringify({ decision }) }),
+  facts: (status?: string) => call<{ facts: Fact[] }>(`/memory/facts${status ? `?status=${status}` : ""}`),
+  reviewFact: (id: string, decision: "confirm" | "reject", replace = false) =>
+    call<{ status: string }>(`/memory/facts/${id}/review`, { method: "POST", body: JSON.stringify({ decision, replace }) }),
   models: () => call<{ models: ModelEntry[]; active_intent: boolean }>("/learning/models"),
   train: () => call("/learning/train", { method: "POST" }),
   promote: (id: string) => call(`/learning/models/${id}/promote`, { method: "POST" }),

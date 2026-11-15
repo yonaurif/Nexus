@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type Feedback, type Folder, type Health, type ModelEntry, type Tool } from "./api";
+import { api, ApiError, type Fact, type Feedback, type Folder, type Health, type ModelEntry, type Tool } from "./api";
 import { INTENT_LABEL } from "./format";
 
 function useLoad<T>(load: () => Promise<T>, everyMs = 0) {
@@ -214,6 +214,51 @@ export function LearningPanel() {
             {m.status === "candidate" && <div className="row"><button onClick={() => promote(m)}>Promover</button></div>}
           </li>
         ))}
+      </ul>
+    </div>
+  );
+}
+
+const loadSuggested = () => api.facts("suggested");
+const loadConfirmed = () => api.facts("confirmed");
+
+/** M3 (Doc 03 §6.1, §9.2, §12): lo que NEXUS cree saber. Solo lo confirmado se usa como dato. */
+export function MemoryPanel() {
+  const pending = useLoad(loadSuggested, 8000);
+  const known = useLoad(loadConfirmed);
+  const [note, setNote] = useState<string | null>(null);
+  async function review(f: Fact, decision: "confirm" | "reject", replace = false) {
+    try { await api.reviewFact(f.fact_id, decision, replace); pending.reload(); known.reload(); setNote(null); }
+    catch (e) { setNote(e instanceof ApiError ? e.code : "error"); }
+  }
+  const triple = (f: Fact) => <p className="triple"><strong>{f.subject}</strong> <span>{f.predicate.replace(/_/g, " ")}</span> {f.object}</p>;
+  return (
+    <div className="panel">
+      <p className="muted">Lo que me dices con «recuerda que…» queda aquí. Solo uso como dato lo que confirmas.</p>
+      {note && <p className="error" role="alert">{note}</p>}
+      <h3>por confirmar</h3>
+      {pending.error && <p className="error">{pending.error}</p>}
+      {!pending.data?.facts.length && <p className="muted">nada pendiente</p>}
+      <ul className="tools">
+        {pending.data?.facts.map((f) => (
+          <li key={f.fact_id} className="tool tool-review">
+            {triple(f)}
+            {f.evidence[0]?.quote && <p className="muted quote">«{f.evidence[0].quote}»</p>}
+            {f.conflicts.map((c) => <p key={c} className="conflict">contradice: {c}</p>)}
+            <div className="row">
+              {f.conflicts.length ? (<>
+                <button onClick={() => review(f, "confirm", true)}>Reemplazar</button>
+                <button className="ghost" onClick={() => review(f, "confirm")}>Mantener ambos</button>
+              </>) : <button onClick={() => review(f, "confirm")}>Confirmar</button>}
+              <button className="ghost" onClick={() => review(f, "reject")}>Descartar</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <h3>confirmado</h3>
+      {!known.data?.facts.length && <p className="muted">todavía nada</p>}
+      <ul className="tools">
+        {known.data?.facts.map((f) => <li key={f.fact_id} className="tool tool-enabled">{triple(f)}</li>)}
       </ul>
     </div>
   );

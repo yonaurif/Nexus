@@ -45,6 +45,7 @@ const WARNINGS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^MODEL_UNAVAILABLE$/, () => "Modelo no disponible"],
   [/^NO_EVIDENCE:knowledge$/, () => "Sin evidencia en tus documentos"],
   [/^NEEDS_INPUT$/, () => "Necesita más detalle"],
+  [/^SECRET_DETECTED$/, () => "Contiene una credencial: no se guarda"],
   [/^PLAN_REJECTED:(\w+)/, (m) => `Plan descartado · ${m[1]}`],
   [/^CAPABILITY_UNAVAILABLE:(\w+)/, (m) => `Aún no disponible · ${m[1]}`],
   [/^(\w+):(\w+)$/, (m) => `Paso ${m[1]} · ${m[2]}`],
@@ -74,5 +75,6 @@ export const INTENT_LABEL: Record<string, string> = {
 export function sourceLabel(ref: string): string {
   if (ref.startsWith("doc:")) return `documento ${ref.slice(4, 16)}…${ref.split("#")[1] ? ` §${ref.split("#")[1]}` : ""}`;
   if (ref.startsWith("internal:")) return ref.slice(9).replace(/_/g, " ");
+  if (ref.startsWith("fact:")) return "memoria";
   return ref.replace(/^[a-z_]+:GET /, "");
 }

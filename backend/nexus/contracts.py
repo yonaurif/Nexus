@@ -114,6 +114,12 @@ class ApprovalDecision(Strict):
     decision: Literal["approve", "reject"]
 
 
+class FactReview(Strict):
+    """Doc 03 §14 `facts/{id}/review`. replace=True: el hecho sustituye a los confirmados que contradice."""
+    decision: Literal["confirm", "reject"]
+    replace: bool = False
+
+
 class FeedbackIn(Strict):
     correct_label: Literal["conversation", "knowledge_query", "task_request", "agent_request", "memory_update",
                            "feedback", "rule_proposal", "system_admin"]

@@ -16,7 +16,7 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 219 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 232 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000   # API + interfaz en http://127.0.0.1:8000
 cd ../frontend && npm install && npm run build   # genera frontend/dist, que sirve el backend (o `npm run dev` en :5173 con proxy)
 # Modelo (en .env o entorno; sin servicios externos):
@@ -349,9 +349,52 @@ Lectura honesta: el test y el entrenamiento los escribió el mismo autor (sinté
 - [ ] Afinar (fine-tuning) el encoder solo si la variante congelada se queda corta con datos reales (requiere torch).
 - [ ] T3: encoder multilingüe compacto como experimento controlado frente a este baseline.
 - [ ] T4: LoRA sobre el LLM local (depende del hardware del equipo de producción, D19).
-### ⬜ M3–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
+### ✅ M3 — Memoria semántica relacional (HECHO) (Doc 03 §3.2, §6.1, §7.3, §9.2, §10, §14)
+
+- [x] Migración `0008`: `entities` (deduplicadas por nombre normalizado sin tildes), `entity_aliases`, `facts` (sujeto · predicado · objeto-entidad u objeto-valor, estados de §6.1, `valid_from/valid_to`, `supersedes_fact_id`), `fact_evidence`, `knowledge_conflicts`. Sin tabla `relations`: un hecho con objeto-entidad es la arista (ponytail, D27).
+- [x] `nexus/memory/facts.py`: el LLM **propone** hechos (JSON validado con Pydantic, máx. 3, predicado snake_case; «recuerda/guarda» no valen como predicado); si falla, se guarda la frase como `propietario · dice · …`. Nada con contraseñas, claves o tokens entra (`redact` + palabras de credencial).
+- [x] Pipeline: `memory_update` deja de estar en `NOT_YET`; pasa por planificar → ejecutar → verificar y responde **en código** (sin LLM) con lo anotado y las contradicciones. Los hechos **confirmados** entran en el contexto de todas las clases (los del propietario + los de entidades nombradas); en `knowledge_query` un hecho confirmado sobre una entidad nombrada **es evidencia** (sin abstención, fuente `fact:<id>`). Los `suggested` nunca se usan como dato.
+- [x] Contradicciones (§9.2): un hecho nuevo con el mismo sujeto+predicado que uno confirmado abre un conflicto; el propietario decide **Reemplazar** (el viejo pasa a `superseded`) o **Mantener ambos**; rechazar lo cierra.
+- [x] API: `GET /memory/facts?status=`, `POST /memory/facts/{id}/review` (confirm/reject + replace, auditado, 404/409). UI: pestaña **memoria** (por confirmar con cita y contradicciones, confirmado). Las 5 pestañas pasan a dos filas.
+- [x] Regla de respaldo: «¿qué sabes **del** X?» no casaba (`de\b` no corta en «del»): corregido en reglas y en el filtro de frases de enrutado.
+- [x] Tests: `test_m3.py` (13).
+- [x] **Prueba real con Qwen:** «prefiero respuestas cortas y trabajo de 9 a 18» → 2 hechos del propietario. «el NAS de la oficina está en el armario del rack 2 y lo gestiona Ana» → al principio `propietario · recuerda · <frase>` (**hallazgo**: añadidos ejemplos al prompt) → después `NAS de la oficina · ubicado_en · armario del rack 2` y `· gestionado_por · Ana`. Confirmados: «¿dónde está el NAS de la oficina?» y «¿quién lo gestiona?» responden con fuente `fact:`; «¿a qué hora termino de trabajar?» → «hasta las 18:00». «trabajo de 8 a 17» → sugerencia con aviso de contradicción.
+- [ ] Hallazgo pendiente: «recuerda que la contraseña del router es …» lo clasificó el modelo activo como `task_request` (no se guardó nada, respuesta fija). Corregirlo desde el chat y reentrenar; valorar comprobar credenciales antes de clasificar.
+- [ ] Siguiente en memoria: identidad/onboarding (nombre de la IA y del propietario en tablas propias, Doc 03 §3.5), olvido (M5) y consolidación desde episodios.
+
+### ⬜ M4–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
 
 Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobaciones (C5).
+
+#### Revisión de pendientes por documento (2026-11-15)
+
+Hoy el clasificador ya reconoce `memory_update`, `rule_proposal` y `system_admin`, pero el Core responde «aún no disponible» (`NOT_YET` en `pipeline.py`): son los huecos más visibles para el usuario.
+
+| Doc | Fase / criterio | Estado | Qué falta |
+|---|---|---|---|
+| 03 | **M3** semántica relacional | ✅ | Entidades, alias, hechos con evidencia, relaciones; `memory_update` («recuerda que…») → hecho **sugerido** hasta confirmar (crit. 5–6) |
+| Base | Onboarding e identidad (MVP 4) | ⬜ | Nombre de la IA y del propietario, preferencias; usarlos en el prompt (depende de M3) |
+| Base/02 | Motor de reglas (MVP 4) | ⬜ | `rule_proposal` → regla propuesta → aprobación → aplicada fuera de los pesos del modelo |
+| 03 | **M4** procedimientos y revisión | ⬜ | Procedimientos declarativos versionados, confirmar/corregir |
+| 03 | **M5** consolidación y olvido | ⬜ | Sugerencias de hechos, conflictos, expiración, **borrado completo** (doc, chunks, vectores, derivados; crit. 12), métricas |
+| 03 | Crit. 13 backups | ⬜ | Backups cifrados de Postgres + restauración probada |
+| 02 | **C3** memoria en el Core | ✅ | Episodios + RAG + hechos confirmados en el contexto |
+| 02 | **C5** idempotencia | 🟡 | Aprobaciones y cancelación hechas; falta idempotencia en reintentos de escritura (crit. 9) |
+| 02 | **C6** multiagente | ⬜ | Agentes con contexto y herramientas aislados, paralelismo (al final) |
+| 05 | **G2** MCP readonly | ⬜ | JSON Schema completo, MCP Host/Client, descubrimiento → revisión → hash, sandbox |
+| 05 | **G3** seguridad operativa | 🟡 | Hay auditoría, health y deshabilitar herramientas; faltan secret store, rate limits, revocación y alertas |
+| 05 | **G4** webhooks | ⬜ | Recepción autenticada, deduplicación, cola durable |
+| 05 | **G5** escritura externa | 🟡 | Solo `notes.create` interno con aprobación; falta escritura remota con confirmación e idempotencia |
+| 05 | **G6** catálogo | ⬜ | Correo, calendario, YouTube (readonly primero) |
+| 04 | Fase 2 | 🟡 | Chat+SSE hechos; faltan Agent Manager y resultados tipados |
+| 04 | Fase 3 | ⬜ | UI Presentation Schema, Component Registry, tablas/gráficos/timelines, layouts |
+| 04 | Fase 4 | 🟡 | Conectores y aprobaciones hechos; faltan permisos granulares, dashboard de observabilidad |
+| 04 | Fase 5 | 🟡 | Aprendizaje hecho; faltan grafo, drift y **rollback desde la UI** |
+| TL | T2 | ✅ | Cubierto por M2 (RAG con citas y abstención) |
+| TL | T4 LoRA | ⬜ | Depende del hardware de producción (D19) |
+| Base | Voz (MVP 8) | ⬜ | Opcional |
+
+**Orden recomendado:** M3 + identidad (cierra `memory_update`) → motor de reglas (cierra `rule_proposal`) → M5 olvido + backups (privacidad) → G2 MCP → G3 → Fase 3 de interfaz → G4–G6 → C6/T4.
 
 ## 4a. Despliegue en el equipo de producción (D19)
 
@@ -412,6 +455,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D27 | M3: hechos `suggested` hasta confirmación del propietario; el LLM solo propone la estructura; sin tabla `relations` (el hecho con objeto-entidad es la arista); contradicciones resueltas por el propietario | Adoptada | Doc 03 §6.1, §7.3, §9.2 |
 | D26 | T3: clasificador = TF-IDF + embeddings del encoder del RAG (MiniLM congelado), sin torch; el artefacto exige el mismo encoder al cargar | Adoptada | TL §12 |
 | D25 | Aprendizaje continuo: la corrección del usuario nunca toca el modelo directamente; staging → revisión del propietario → reentrenamiento → candidato; feedback solo en entrenamiento; promoción bloqueada si regresa >0,02 | Adoptada | TL §8 |
 | D24 | IA propia de intención: TF-IDF+LR con abstención; híbrido con reglas; promoción solo si supera a las reglas y por decisión del propietario; artefactos con hash | Adoptada | TL §4.3, §7, §8 |
@@ -455,3 +499,4 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | Candidato T5 `mdl_0cc54155…` promovido a activo por el propietario (auditado); el anterior queda retirado | carga con hash verificado; "Helios" → knowledge_query; "migración del NAS" cae a conversation (antes task_request): pendiente de más ejemplos |
 | 2026-11-15 | T3: dataset 183 → 463, variante TF-IDF + encoder MiniLM, carga ligada al encoder, entrenamiento por API/CLI con el embedder del RAG | `pytest` 219 passed; candidato `+enc`: híbrido 0,871, acierto en lo aceptado 92 %, sondas 17/21 (activo 12/21), sin promover |
 | 2026-11-15 | Candidato T3 `mdl_25b7562b…` (`intent_es_v1+enc:180f58a6594d`) promovido a activo por el propietario (auditado); el anterior queda retirado | carga con el embedder MiniLM verificado; Helios, migración del NAS y "¿qué sabes del NAS?" → knowledge_query |
+| 2026-11-15 | M3: entidades, alias, hechos con evidencia y conflictos (migración 0008); `memory_update` → sugerencia; hechos confirmados como contexto y evidencia; pestaña memoria | `pytest` 232 passed; real con Qwen: NAS ubicado/gestionado confirmados y usados con fuente `fact:`, contradicción de horario detectada |

@@ -212,3 +212,13 @@ button.link.small { font-size: 0.72rem; }
 .tabs button { font-size: 0.62rem; }
 .rail { overflow-x: hidden; }
 .tabs button[role="tab"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.02em; }
+
+/* --- M3: memoria; 5 pestañas en dos filas en vez de cortar los nombres --- */
+.tabs { flex-wrap: wrap; }
+.tabs button[role="tab"] { flex: 1 0 30%; padding: 0.7rem 0.3rem; }
+.tabs .rail-toggle { position: absolute; right: 0; top: 0; }
+.tabs { position: sticky; padding-right: 44px; }
+.triple { margin: 0; line-height: 1.5; }
+.triple span { color: var(--amber); font-family: var(--mono); font-size: 0.75rem; padding: 0 0.3rem; }
+.quote { font-size: 0.75rem; margin: 0.3rem 0 0; }
+.conflict { color: var(--amber); font-size: 0.75rem; margin: 0.3rem 0 0; }
