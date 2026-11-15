@@ -16,12 +16,13 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 122 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 181 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=a.gguf;b.gguf   (cadena con respaldo, en orden de preferencia; NEXUS_GGUF_GPU_LAYERS=auto|N; NEXUS_GGUF_CTX)
 #   NEXUS_EMBED_MODEL_DIR=<snapshot HF de paraphrase-multilingual-MiniLM-L12-v2>  (activo; ONNX, pip install -e ".[embeddings]")
 #   OCR: Tesseract en C:\Program Files\Tesseract-OCR (auto) + backend/tessdata (spa/eng/osd, copiado de Primitivo, no se sube)
+#   GitHub (opcional): NEXUS_GITHUB_TOKEN=<fine-grained, solo lectura>; sin token: repos públicos, 60 peticiones/h
 #   carpetas: NEXUS_FOLDER_ROOTS=C:/ruta1;C:/ruta2  (raíces autorizadas; sin esto no se puede registrar ninguna)
 #   reindexar vectores tras cambiar de embedder: .venv/Scripts/python.exe -m nexus.knowledge.reindex
 #   reinstalar con CUDA (en ESTE equipo; en otro, su arquitectura o sin -DCMAKE_CUDA_ARCHITECTURES): CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
@@ -202,12 +203,25 @@ Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real;
 
 Diferido: paralelismo de pasos (C6); aislar adaptadores en proceso/contenedor (C6); `success_criteria` estructurados; cancelación cooperativa (C5).
 
-### ⬜ G1/G2 — REST y MCP readonly (Doc 05 §7–8)
+### ✅ G1 — REST readonly + conector GitHub (HECHO) (Doc 05 §6–7, §10–11, §14)
+
+- [x] `backend/nexus/gateway/http_safe.py` (del Worker `updater.py` H-12): host canónico, todas las IP públicas, **conexión a la IP validada con Host+SNI (anti DNS rebinding)**, redirecciones revalidadas (máx. 3), solo https sin credenciales en URL, `allowed_hosts` por conector, límite de bytes **descomprimidos**, errores Doc 05 §14 (AUTH_REQUIRED, SCOPE_MISSING, RESOURCE_NOT_FOUND, RATE_LIMITED, TIMEOUT, CONNECTOR_UNAVAILABLE, RESPONSE_TOO_LARGE, POLICY_DENIED, TOO_MANY_REDIRECTS).
+- [x] `backend/nexus/gateway/rest.py`: `RestTool` (solo GET, ruta con plantilla, consulta permitida, campos de salida, listas acotadas) + `RestConnector` (host fijo, argumentos de ruta sin `/` ni `..`, token desde entorno nunca en datos/evidencia, evidencia `conector:GET ruta`).
+- [x] `backend/nexus/gateway/connectors.py`: **GitHub readonly** (`github.repository.get`, `github.user.repos`), registrado en **`review`** al arrancar.
+- [x] API: `GET /api/v1/connectors`, `POST /api/v1/connectors/tools/{id}/approve`, `POST …/disable` (con `audit_events`); deshabilitar no requiere desplegar y re-registrar no reactiva.
+- [x] Executor conserva los códigos del adaptador (`RATE_LIMITED` reintentable); `agent_request` pasa por el Planner.
+- [x] **Sin datos no hay respuesta inventada:** si todas las herramientas fallan, respuesta fija con los errores y sin LLM (medido: Qwen inventó lenguaje/rama y `{"repos": []}` con GitHub fallando).
+- [x] Tests: `test_http_safe.py` (45: 24 hosts maliciosos del Worker, rebinding, redirecciones, gzip, bomba de descompresión) + `test_rest.py` (14).
+- [x] Prueba real contra api.github.com sin token: en `review` → `PLAN_REJECTED`; aprobado → "Python, rama main" con fuente `github_readonly:GET /repos/yonaurif/Nexus`; lista real de repos (Nexus, GalaTrain).
+
+Fallo encontrado solo con el servicio real: `iter_bytes()` ya descomprime y la respuesta reconstruida conservaba `Content-Encoding: gzip` → `zlib.error`. Corregido con test.
+
+Diferido: `web.search`/`web.fetch` aislados (Primitivo `websearch`), webhooks (G4), escritura con aprobación contextual (G5, requiere C5), secret store cifrado (G3, `core/crypto.py` de Primitivo).
+
+### ⬜ G2 — MCP readonly (Doc 05 §8)
 
 - [ ] Validación JSON Schema completa (`jsonschema`) de input y output (sustituye el chequeo de `required`)
-- [ ] Adaptador REST con allowlist de hosts y bloqueo SSRF
 - [ ] MCP Host/Client (SDK oficial, versión fijada tras prueba en Windows/Docker); descubrimiento → `review` → aprobación
-- [ ] Primer conector: **GitHub readonly** (`github.repository.get`)
 
 ### ✅ M1/M2 — Episodios, documentos y RAG híbrido (HECHO) (Doc 03 §17)
 
@@ -282,6 +296,7 @@ Qué necesita el equipo destino (todo opcional salvo lo marcado):
 | Embeddings ONNX + `.[embeddings]` | No | `NEXUS_EMBED_MODEL_DIR` | RAG solo full-text |
 | Tesseract + `tessdata` (spa/eng) + `.[documents]` | No | `NEXUS_TESSERACT_CMD`, `NEXUS_TESSDATA_DIR`, `NEXUS_OCR_LANGUAGES` | Sin OCR (PDF con texto sí) |
 | Carpetas a sincronizar | No | `NEXUS_FOLDER_ROOTS` | No se pueden registrar carpetas |
+| Salida a internet (HTTPS) para conectores | No | `NEXUS_GITHUB_TOKEN` (opcional) + aprobar herramientas en `/api/v1/connectors` | Conectores externos no disponibles |
 
 Ya adaptativo (prioridad 4 de §4b): NEXUS mide RAM/VRAM del equipo al cargar, decide las capas en GPU, descarta modelos que no caben y cae al siguiente de la cadena; `/system/health` muestra hardware y estado de cada candidato. Pendiente para producción: elegir la cadena de modelos para el equipo destino, empaquetado/servicio de arranque y backups.
 
@@ -295,7 +310,7 @@ Fuente: `C:\Users\YonaPc\Documents\GitHub\Primitivo proyecto`. Versiones revisad
 |---|---|---|---|---|
 | 1 ✅ | Ingesta de PDF/DOCX/XLSX/CSV/HTML/JSON/imágenes con **OCR** (Doc 03 §4–5 · M2) — **portado** | `Primitivo-f25/backend/app/gala/document_extractor.py` (PyMuPDF + Tesseract, OCR de páginas escaneadas y de imágenes incrustadas en PDF/DOCX; f25 lo hace en gris y 1 hilo) | Config por `env()` en vez de `settings`; **errores separados del texto** (hoy el mensaje de error se indexaría como contenido); HTML sin `<script>/<style>`; salida → `ingest_document()` (redacción de secretos ya incluida). Tesseract ya instalado en `C:\Program Files\Tesseract-OCR`; `tessdata` (spa/eng/osd) en `Primitivo/backend/tessdata`. Endpoint `POST /api/v1/knowledge/files` (multipart, límite de tamaño, tipos permitidos) | `test_document_extractor.py` |
 | 2 ✅ | Sincronización incremental de carpetas como fuente (Doc 03 §5 Source Registry, `sync_policy` · M5) — **portado** | `gala/kb_service.py` (recorrido + manifiesto por `mtime,size`, reindexado incremental, borrado de huérfanos) + `gala/kb_scheduler.py` (APScheduler cron) | Manifiesto en `source_versions`/`documents` de NEXUS; rutas solo dentro de raíces autorizadas (Doc 02 §16); sin la parte SMB/UNC hasta que haga falta | `test_kb_device_sync.py` (f25) |
-| 3 | Adaptador REST seguro: allowlist, **anti-SSRF**, redirecciones, límite de tamaño (Doc 05 §7 · G1) | `websearch/service.py` (`_is_safe_url`, `_is_unsafe_ip`, `_fetch_page_html`: valida IP resuelta y cada redirección) | Módulo `nexus/gateway/http_safe.py` usado por todos los adaptadores REST; además herramienta `web.search` (DuckDuckGo/Tavily) **aislada sin acceso a DB**, como en Primitivo, resultados como datos no confiables | `test_websearch.py`, `Worker/tests/test_ssrf.py` |
+| 3 ✅ | Adaptador REST seguro: allowlist, **anti-SSRF**, redirecciones, límite de tamaño (Doc 05 §7 · G1) — **portado** (del Worker `updater.py`, más fuerte que `websearch`) | `websearch/service.py` (`_is_safe_url`, `_is_unsafe_ip`, `_fetch_page_html`: valida IP resuelta y cada redirección) | Módulo `nexus/gateway/http_safe.py` usado por todos los adaptadores REST; además herramienta `web.search` (DuckDuckGo/Tavily) **aislada sin acceso a DB**, como en Primitivo, resultados como datos no confiables | `test_websearch.py`, `Worker/tests/test_ssrf.py` |
 | 4 ✅ | Router de modelos con conciencia de hardware (Doc 02 §10, Doc 04 §12 métricas reales) — **portado** | Worker `hardware.py` (psutil + nvidia-smi), `engine_llamacpp.py::auto_gpu_layers/resolve_gpu_layers` (capas en GPU según VRAM libre, margen 0,92), `model_catalog.py` (catálogo + compatibilidad RAM/VRAM), Primitivo `gala/model_fallback.py` (cadena de modelos de respaldo) | `NEXUS_GGUF_GPU_LAYERS=auto`; `/system/health` con CPU/RAM/GPU/VRAM reales; fallback entre tus GGUF de `C:\Worker Primitivo\models` si uno falla al cargar | `test_hardware.py`, `test_engine_llamacpp.py`, `test_model_catalog.py`, `test_gala_model_fallback.py` |
 | 5 | Cola con contrapresión para el modelo (Doc 02 §11 límites) | Worker `queue_control.py::RequestQueue` (FIFO, concurrencia 1, 503 si se llena) | Sustituye el `threading.Lock` de `LlamaCppModel`; estado de cola en health | `test_queue_control.py`, `test_request_queue.py` |
 | 6 | Métricas por fase y modelo (Doc 02 §13 `model_invocations`, §15) | `core/perf_log.py` (JSONL), timings de `gala/llm.py` | En NEXUS a tabla `model_invocations` (latencia, tokens, modelo) en vez de JSONL | `test_performance.py` |
@@ -324,6 +339,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D21 | Conectores externos: solo vía `http_safe` (IP fijada, allowlist por conector), solo GET hasta C5, en `review` hasta aprobación del propietario; fallo total de herramientas → respuesta en código | Adoptada | Doc 05 §3, §7, §8.1 |
 | D20 | Modelos: cadena con respaldo y capas en GPU automáticas según el equipo; el razonamiento `<think>` nunca sale | Adoptada | D19, Doc 02 §10, §15 |
 | D17 | Carpetas: solo bajo `NEXUS_FOLDER_ROOTS`; archivos con nombre de secreto nunca se leen; planificador en hilo propio (no APScheduler) | Adoptada | Doc 02 §16, Doc 04 §11 |
 | D18 | Fragmentos con ruta de títulos + filtro por entidades nombradas en RAG | Adoptada (heurística hasta M3) | medido con datos reales |
@@ -352,3 +368,4 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | Portado de Primitivo-f25: extractor de documentos con OCR + `POST /knowledge/files`; embedder a 128 tokens con reindexado gradual | `pytest` 94 passed; docx real + PDF escaneado subidos y consultados con Qwen |
 | 2026-11-15 | Portado de Primitivo-f25: carpetas sincronizadas (manifiesto, pasadas, planificador) con raíces autorizadas y exclusión de archivos de credenciales; ruta de títulos en chunks; filtro por entidades | `pytest` 111 passed; carpeta real: cambios y borrados detectados, Qwen responde "9700" y se abstiene sobre Primitivo Suite |
 | 2026-11-15 | Portado del Worker: detección de hardware, capas GPU automáticas, cadena de modelos con respaldo; health con hardware real; filtrado de `<think>` | `pytest` 122 passed; real: 26 capas con 5,15 GB VRAM libre; GGUF corrupto → Qwen3-4B |
+| 2026-11-15 | G1: `http_safe` (portado del Worker), adaptador REST, conector GitHub readonly en revisión + API de aprobación; sin respuesta inventada si fallan las herramientas | `pytest` 181 passed; real contra api.github.com: repo y lista de repos con fuentes |

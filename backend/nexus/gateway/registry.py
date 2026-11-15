@@ -53,10 +53,24 @@ class SqlToolRegistry:
             {"t": manifest.tool_id, "c": manifest.connector_id,
              "m": manifest.model_dump_json(exclude={"definition_hash"}), "h": manifest.definition_hash})
 
-    def approve(self, tool_id: str) -> None:
-        self.conn.execute(sa.text(
+    def approve(self, tool_id: str) -> bool:
+        return self.conn.execute(sa.text(
             "UPDATE tools SET approved_hash = definition_hash, status = 'enabled', updated_at = now() "
-            "WHERE tool_id = :t"), {"t": tool_id})
+            "WHERE tool_id = :t"), {"t": tool_id}).rowcount > 0
+
+    def disable(self, tool_id: str) -> bool:
+        """Doc 05 aceptación #15: revocar sin desplegar. Re-registrar no la reactiva."""
+        return self.conn.execute(sa.text("UPDATE tools SET status = 'disabled', updated_at = now() "
+                                         "WHERE tool_id = :t"), {"t": tool_id}).rowcount > 0
+
+    def list_all(self) -> list[dict]:
+        rows = self.conn.execute(sa.text(
+            "SELECT tool_id, connector_id, status, definition_hash, approved_hash, manifest, updated_at "
+            "FROM tools ORDER BY connector_id, tool_id")).all()
+        return [{"tool_id": r.tool_id, "connector_id": r.connector_id, "status": r.status,
+                 "risk_level": r.manifest.get("risk_level"), "description": r.manifest.get("description"),
+                 "definition_hash": r.definition_hash, "approved": r.approved_hash == r.definition_hash,
+                 "updated_at": r.updated_at} for r in rows]
 
     def list_enabled(self) -> list[ToolManifest]:
         """Herramientas aprobadas y sin cambios: lo único que se ofrece al Planner."""

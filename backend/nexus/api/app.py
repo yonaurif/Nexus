@@ -20,7 +20,8 @@ from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreE
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
 from nexus.core import hardware, pipeline, task_store
-from nexus.gateway import internal_tools
+from nexus.gateway import connectors, internal_tools
+from nexus.gateway.registry import SqlToolRegistry
 from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
 from nexus.memory import episodes
@@ -55,8 +56,6 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
     if embedder is AUTO:
         from nexus.knowledge.embeddings import get_embedder
         embedder = get_embedder()  # None => RAG solo full-text
-    if adapters is None:
-        adapters = internal_tools.ADAPTERS
     if engine is None:
         from nexus.db import get_engine
         engine = get_engine()
@@ -68,7 +67,10 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         raise RuntimeError("Define NEXUS_API_TOKEN (.env)")
 
     with engine.begin() as c:
-        internal_tools.seed(c)
+        internal_tools.seed(c)                    # internas: revisadas como código -> aprobadas
+        external_adapters = connectors.seed(c)    # externas: quedan en `review` hasta que el propietario apruebe
+    if adapters is None:
+        adapters = {**internal_tools.ADAPTERS, **external_adapters}
     if start_scheduler:
         _start_sync_scheduler(engine, embedder)
 
@@ -228,6 +230,33 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         with engine.connect() as c:
             rows = episodes.search(c, owner, event_type=event_type, since=since, until=until, limit=limit)
         return {"episodes": [EpisodeView(**{k: getattr(r, k) for k in EpisodeView.model_fields}) for r in rows]}
+
+    # --- Conectores y herramientas (Doc 05 §13) ---
+    @app.get("/api/v1/connectors")
+    def list_connectors(owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return {"tools": SqlToolRegistry(c).list_all()}
+
+    @app.post("/api/v1/connectors/tools/{tool_id}/approve")
+    def approve_tool(tool_id: str, owner: str = Depends(auth)):
+        # ponytail: el token único es el propietario; sesión administrativa reforzada (Doc 05 §6.2 admin) en Fase 4
+        with engine.begin() as c:
+            if not SqlToolRegistry(c).approve(tool_id):
+                raise HTTPException(404, "TOOL_NOT_FOUND")
+            audit(c, owner, "tool.approved", tool_id)
+        return {"tool_id": tool_id, "status": "enabled"}
+
+    @app.post("/api/v1/connectors/tools/{tool_id}/disable")
+    def disable_tool(tool_id: str, owner: str = Depends(auth)):
+        with engine.begin() as c:
+            if not SqlToolRegistry(c).disable(tool_id):
+                raise HTTPException(404, "TOOL_NOT_FOUND")
+            audit(c, owner, "tool.disabled", tool_id)
+        return {"tool_id": tool_id, "status": "disabled"}
+
+    def audit(c, actor: str, action: str, tool_id: str) -> None:
+        c.execute(sa.text("INSERT INTO audit_events (actor_type, actor_id, action, entity_type, entity_id) "
+                          "VALUES ('owner', :a, :ac, 'tool', :t)"), {"a": actor, "ac": action, "t": tool_id})
 
     @app.get("/api/v1/system/health")
     def health():

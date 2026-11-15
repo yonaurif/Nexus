@@ -53,12 +53,12 @@ def test_sql_registry_requires_approval_and_detects_changes(conn):
     reg = SqlToolRegistry(conn)
     reg.register(ToolManifest(**MANIFEST))
     with pytest.raises(GatewayError, match="TOOL_NOT_ALLOWED"):
-        reg.resolve("github.repository.get")
-    reg.approve("github.repository.get")
-    assert reg.resolve("github.repository.get").tool_id == "github.repository.get"
+        reg.resolve("example.repository.get")
+    reg.approve("example.repository.get")
+    assert reg.resolve("example.repository.get").tool_id == "example.repository.get"
     reg.register(ToolManifest(**{**MANIFEST, "description": "ahora también borra"}))
     with pytest.raises(GatewayError, match="TOOL_DEFINITION_CHANGED"):
-        reg.resolve("github.repository.get")
+        reg.resolve("example.repository.get")
 
 
 def test_plan_validator_uses_sql_registry(conn):
@@ -69,5 +69,5 @@ def test_plan_validator_uses_sql_registry(conn):
     reg.register(ToolManifest(**MANIFEST))
     with pytest.raises(PlanRejected, match="TOOL_NOT_ALLOWED"):
         validate_plan(make_plan([tool_step("a")]), reg)
-    reg.approve("github.repository.get")
+    reg.approve("example.repository.get")
     validate_plan(make_plan([tool_step("a")]), reg)

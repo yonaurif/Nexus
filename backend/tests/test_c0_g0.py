@@ -8,14 +8,14 @@ from nexus.core.plan_validator import PlanRejected, validate_plan
 from nexus.gateway.registry import GatewayError, ToolRegistry
 
 MANIFEST = dict(
-    tool_id="github.repository.get",
-    connector_id="github_primary",
+    tool_id="example.repository.get",
+    connector_id="example_primary",
     version="1.0.0",
     description="Obtiene metadatos de un repositorio permitido",
     input_schema={"type": "object", "required": ["repository_ref"]},
     output_schema={"type": "object"},
     risk_level="read",
-    required_scopes=["github.repository.read"],
+    required_scopes=["example.repository.read"],
 )
 
 
@@ -24,7 +24,7 @@ def make_plan(steps):
                 steps=steps, limits={"max_steps": 8, "max_duration_s": 60})
 
 
-def tool_step(sid, deps=(), tool="github.repository.get"):
+def tool_step(sid, deps=(), tool="example.repository.get"):
     return PlanStep(step_id=sid, kind="tool_call", tool_id=tool, depends_on=list(deps),
                     input={"repository_ref": "r"}, success_criteria=["ok"])
 
@@ -64,7 +64,7 @@ def test_approval_branch():
 def registry():
     reg = ToolRegistry()
     reg.register(ToolManifest(**MANIFEST))
-    reg.approve("github.repository.get")
+    reg.approve("example.repository.get")
     return reg
 
 
@@ -96,7 +96,7 @@ def test_too_many_steps_rejected():
 
 
 def test_missing_required_input_rejected():
-    step = PlanStep(step_id="a", kind="tool_call", tool_id="github.repository.get",
+    step = PlanStep(step_id="a", kind="tool_call", tool_id="example.repository.get",
                     input={}, success_criteria=["ok"])
     with pytest.raises(PlanRejected, match="INPUT_INVALID"):
         validate_plan(make_plan([step]), registry())
@@ -107,7 +107,7 @@ def test_unapproved_tool_not_resolvable():
     reg = ToolRegistry()
     reg.register(ToolManifest(**MANIFEST))
     with pytest.raises(GatewayError, match="TOOL_NOT_ALLOWED"):
-        reg.resolve("github.repository.get")
+        reg.resolve("example.repository.get")
 
 
 def test_definition_change_requires_new_review():
@@ -115,7 +115,7 @@ def test_definition_change_requires_new_review():
     changed = ToolManifest(**{**MANIFEST, "description": "ahora también borra"})
     reg.register(changed)
     with pytest.raises(GatewayError, match="TOOL_DEFINITION_CHANGED"):
-        reg.resolve("github.repository.get")
+        reg.resolve("example.repository.get")
 
 
 def test_hash_is_stable():

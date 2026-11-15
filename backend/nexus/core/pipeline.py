@@ -25,10 +25,10 @@ log = logging.getLogger("nexus.pipeline")
 HISTORY_LIMIT = 10  # ponytail: por nº de mensajes; presupuesto por tokens cuando haya tokenizador
 REPLAN_BUDGET = 1
 TOOL_RESULTS_MAX_CHARS = 4000
-PLANNED = {"task_request"}  # clases que pasan por el Planner con herramientas
+PLANNED = {"task_request", "agent_request"}  # clases que pasan por el Planner con herramientas
 RAG_K = 5
 NOT_YET = {  # clase -> fase en la que se habilita
-    "agent_request": "C4/G2", "memory_update": "M3", "rule_proposal": "C5",
+    "memory_update": "M3", "rule_proposal": "C5",
     "feedback": "T5", "system_admin": "G3",
 }
 
@@ -75,6 +75,8 @@ def _with_tool_results(messages: list[dict], results: dict) -> list[dict]:
     return messages[:-1] + [note] + messages[-1:]
 
 
+FAILED_REPLY = ("No he podido obtener los datos necesarios, así que no voy a suponer la respuesta. "
+                "Errores: {}. Puedes reintentarlo más tarde o revisar el conector en /api/v1/connectors.")
 NO_EVIDENCE_REPLY = ("No he encontrado información sobre eso en tus documentos. "
                      "Si me pasas el documento que lo contiene, puedo incorporarlo.")
 
@@ -166,6 +168,15 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
             if verdict.status == "completed" or not verdict.retriable or version > REPLAN_BUDGET:
                 break
             feedback = verdict.warnings  # replanificación limitada (Doc 02 §7.2.5)
+
+        if verdict.status == "failed":
+            # Todas las herramientas fallaron: respuesta en código, sin LLM. Medido con Qwen contra GitHub:
+            # sin datos inventó "usa Python, rama main" y un {"repos": []} (Doc 02 aceptación #7–8).
+            _step(engine, task_id, S.failed)
+            _reply(engine, task_id, conversation_id, FAILED_REPLY.format(", ".join(verdict.warnings)),
+                   warnings + verdict.warnings)
+            _episode(engine, task_id, conversation_id, label, message, S.failed.value, correlation_id)
+            return
 
         try:
             text = model.generate(_with_tool_results(messages, results)).strip()

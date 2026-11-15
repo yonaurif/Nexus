@@ -45,6 +45,8 @@ def _invoke(engine, adapters, step: PlanStep, inv: str, corr: str, budget_s: flo
         out = _pool.submit(adapter, m.tool_id, dict(step.input)).result(timeout=min(m.timeout_ms / 1000, budget_s))
     except FutureTimeout:
         return fail("TIMEOUT", ms(), m.definition_hash)
+    except GatewayError as e:  # el adaptador ya normalizó el error (Doc 05 §14)
+        return fail(e.code, ms(), m.definition_hash)
     except Exception:
         log.exception("adapter failure tool=%s inv=%s", m.tool_id, inv)
         return fail("CONNECTOR_UNAVAILABLE", ms(), m.definition_hash)
