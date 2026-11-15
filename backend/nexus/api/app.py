@@ -13,7 +13,7 @@ from pathlib import Path
 import sqlalchemy as sa
 from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Response,
                      UploadFile)
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from nexus.config import env
 from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
@@ -33,6 +33,7 @@ FINISHED = {"completed", "partial", "failed", "cancelled", "expired"}
 STREAM_MAX_S = 120
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # ponytail: límite fijo; por tipo/propietario cuando haya cuotas
 SYNC_TICK_S = 60
+FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
 AUTO = object()
@@ -320,7 +321,52 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                 "components": {"database": db, "model": model_info, "embeddings": emb,
                                "hardware": hardware.get_hardware_info()}}
 
+    # --- Conversaciones (Doc 04 §9.1) ---
+    @app.get("/api/v1/chat/conversations")
+    def list_conversations(owner: str = Depends(auth)):
+        with engine.connect() as c:
+            rows = c.execute(sa.text(
+                "SELECT c.id, c.created_at, (SELECT content FROM messages WHERE conversation_id=c.id AND role='user' "
+                "ORDER BY id LIMIT 1) AS title, (SELECT count(*) FROM messages WHERE conversation_id=c.id) AS n, "
+                "(SELECT max(created_at) FROM messages WHERE conversation_id=c.id) AS last_at "
+                "FROM conversations c WHERE c.owner_id=:o ORDER BY last_at DESC NULLS LAST LIMIT 50"), {"o": owner}).all()
+        return {"conversations": [{"conversation_id": r.id, "title": (r.title or "")[:80], "messages": r.n,
+                                   "created_at": r.created_at, "last_at": r.last_at} for r in rows]}
+
+    @app.get("/api/v1/chat/conversations/{conversation_id}")
+    def get_conversation(conversation_id: str, owner: str = Depends(auth)):
+        with engine.connect() as c:
+            if not c.scalar(sa.text("SELECT 1 FROM conversations WHERE id=:i AND owner_id=:o"),
+                            {"i": conversation_id, "o": owner}):
+                raise HTTPException(404, "CONVERSATION_NOT_FOUND")
+            rows = c.execute(sa.text(
+                "SELECT m.id, m.role, m.content, m.task_id, m.metadata, m.created_at, t.status AS task_status "
+                "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id WHERE m.conversation_id=:i ORDER BY m.id"),
+                {"i": conversation_id}).all()
+        return {"conversation_id": conversation_id, "messages": [
+            {"id": r.id, "role": r.role, "content": r.content, "task_id": r.task_id, "task_status": r.task_status,
+             "warnings": (r.metadata or {}).get("warnings", []), "sources": (r.metadata or {}).get("sources", []),
+             "created_at": r.created_at} for r in rows]}
+
+    _serve_frontend(app)
     return app
+
+
+def _serve_frontend(app: FastAPI) -> None:
+    """Sirve el build de la interfaz (frontend/dist) en el mismo proceso: un solo puerto en producción,
+    sin CORS. Las rutas del cliente devuelven index.html; /api/* nunca queda tapado."""
+    dist = Path(env("NEXUS_FRONTEND_DIST") or FRONTEND_DIST).resolve()
+    if not (dist / "index.html").is_file():
+        return
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404, "NOT_FOUND")
+        target = (dist / path).resolve()
+        if path and target.is_file() and target.is_relative_to(dist):  # sin salir de dist (../)
+            return FileResponse(target)
+        return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 def __getattr__(name):  # `uvicorn nexus.api.app:app` sin crear la app al importar el módulo

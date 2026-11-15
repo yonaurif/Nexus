@@ -16,8 +16,9 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 193 passed (usa la DB nexus_test, nunca la de desarrollo)
-.venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
+.venv/Scripts/python.exe -m pytest -q                              # 196 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000   # API + interfaz en http://127.0.0.1:8000
+cd ../frontend && npm install && npm run build   # genera frontend/dist, que sirve el backend (o `npm run dev` en :5173 con proxy)
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=a.gguf;b.gguf   (cadena con respaldo, en orden de preferencia; NEXUS_GGUF_GPU_LAYERS=auto|N; NEXUS_GGUF_CTX)
 #   NEXUS_EMBED_MODEL_DIR=<snapshot HF de paraphrase-multilingual-MiniLM-L12-v2>  (activo; ONNX, pip install -e ".[embeddings]")
@@ -47,7 +48,9 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 ## 2. Mapa de conexiones (cómo está cableado)
 
 ```text
-            [Frontend React]  (pendiente: Fase 1 de Doc 04)
+            frontend/ React 19 + TypeScript + Vite  ✅ (Fase 1 de Doc 04)
+              Chat (cinta de estados por SSE, permiso de trabajo, fuentes, cancelar) · Sistema · Conocimiento · Conectores
+              build en frontend/dist servido por el backend (_serve_frontend): un solo puerto, sin CORS
                   │ HTTPS + Bearer NEXUS_API_TOKEN / SSE
                   v
   nexus/api/app.py  create_app(engine, model, token, adapters)        ✅ HECHO (C1, C2)
@@ -290,6 +293,20 @@ Diferido: vuelta automática al modelo principal (Primitivo la tiene), elección
 
 Diferido: aprobación en la interfaz (tarjeta UI, Fase 4 de Doc 04), sesión administrativa reforzada para aprobar (Doc 05 §6.2), generador de documentos Word/Excel/PDF (§4b prioridad 8) como siguiente herramienta de escritura.
 
+### ✅ Interfaz web — Fase 1 de Doc 04 (HECHO)
+
+- [x] `frontend/` React 19 + TypeScript + Vite (Doc 04 §13); fuentes empaquetadas con @fontsource (sin peticiones a Google: el equipo de producción puede no tener internet).
+- [x] Dirección visual "sala de control": grafito, acento ámbar, telemetría en IBM Plex Mono, Bricolage Grotesque para la conversación; adaptable (≤1100 px panel en capa, ≤760 px una columna), foco visible, `prefers-reduced-motion`.
+- [x] Chat: **cinta de estados** con las etapas reales del Doc 02 §7.1 encendidas por SSE (fetch con auth y `Last-Event-ID`), texto del asistente sin HTML crudo (Doc 04 §5.5), avisos legibles, fuentes, cancelar.
+- [x] **Permiso de trabajo** (aprobación): herramienta, riesgo, reversibilidad, parámetros exactos, caducidad, Aprobar/Rechazar → reanuda y muestra el resultado.
+- [x] Paneles: Sistema (hardware real, modelo activo, cadena y capas GPU), Conocimiento (subir documento con OCR, carpetas vigiladas, sincronizar), Conectores (revisión/aprobar/desactivar).
+- [x] Backend: `GET /api/v1/chat/conversations`, `GET /api/v1/chat/conversations/{id}`; el build se sirve desde FastAPI con fallback SPA sin tapar `/api` ni salir de `dist` (3 tests en `test_ui_api.py`).
+- [x] Probado en el navegador integrado (instancia local con token de prueba temporal): conversación nueva → cinta en vivo → permiso de trabajo → aprobar → "completada" con fuente; pestañas; vista móvil.
+
+Fallos encontrados probando en navegador, corregidos: (1) crear conversación remontaba el chat y perdía el SSE; (2) tras aprobar, el stream se abría con la tarea aún en `awaiting_approval` y la interfaz se quedaba en un estado intermedio → ahora se sigue hasta un estado final; (3) la descripción de `notes.create` decía "requiere aprobación" y el modelo lo repetía en su respuesta; (4) panel lateral tapando el chat en móvil; (5) carpetas inactivas mostradas como operativas.
+
+Diferido: auth con sesiones/roles (Fase 4; hoy token en sessionStorage), UI declarativa por esquemas para resultados de herramientas (Fase 3), layouts personalizables, Learning Center (Fase 5), tests de componentes.
+
 ### ⬜ T0/T1 — Text Learning (doc TL §12)
 
 - [ ] Esquema JSONL + taxonomía de intenciones (clases de Doc 02 §4)
@@ -306,6 +323,7 @@ Qué necesita el equipo destino (todo opcional salvo lo marcado):
 | Pieza | Obligatorio | Cómo se configura | Si falta |
 |---|---|---|---|
 | Python 3.11+ y `backend/` con `pip install -e .` | Sí | — | — |
+| Interfaz web (`frontend/`, `npm run build` con Node 20+) | No | `NEXUS_FRONTEND_DIST` si el build está en otra ruta | Solo API |
 | PostgreSQL 16 + pgvector (`docker compose up -d db` o servidor propio) | Sí | `NEXUS_DATABASE_URL` o `NEXUS_DB_PASSWORD` | No arranca |
 | `NEXUS_API_TOKEN` | Sí | `.env` | No arranca |
 | Modelo GGUF + `.[gguf]` (CPU o GPU según el equipo) | No | `NEXUS_GGUF_PATH` (uno o varios con `;`), `NEXUS_GGUF_CTX`, `NEXUS_GGUF_GPU_LAYERS=auto` | `StubModel` (tareas `partial`); si un modelo no cabe o no carga, pasa al siguiente |
@@ -356,6 +374,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D23 | Interfaz: React+TS+Vite servida por el propio backend (un puerto), fuentes locales, sin HTML del modelo, token de instancia en sessionStorage hasta Fase 4 | Adoptada | Doc 04 §5.5, §13 |
 | D22 | Aprobaciones con argumentos en servidor + hash, TTL 15 min, consumo único al ejecutar; el Planner usa JSON por gramática; nunca se afirman acciones no ejecutadas | Adoptada | Doc 02 §11, Doc 05 §11 |
 | D21 | Conectores externos: solo vía `http_safe` (IP fijada, allowlist por conector), solo GET hasta C5, en `review` hasta aprobación del propietario; fallo total de herramientas → respuesta en código | Adoptada | Doc 05 §3, §7, §8.1 |
 | D20 | Modelos: cadena con respaldo y capas en GPU automáticas según el equipo; el razonamiento `<think>` nunca sale | Adoptada | D19, Doc 02 §10, §15 |
@@ -388,3 +407,4 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | Portado del Worker: detección de hardware, capas GPU automáticas, cadena de modelos con respaldo; health con hardware real; filtrado de `<think>` | `pytest` 122 passed; real: 26 capas con 5,15 GB VRAM libre; GGUF corrupto → Qwen3-4B |
 | 2026-11-15 | G1: `http_safe` (portado del Worker), adaptador REST, conector GitHub readonly en revisión + API de aprobación; sin respuesta inventada si fallan las herramientas | `pytest` 181 passed; real contra api.github.com: repo y lista de repos con fuentes |
 | 2026-11-15 | C5: aprobaciones ligadas a parámetros exactos, caducidad, consumo único, cancelación cooperativa, `notes.create`; Planner con JSON por gramática; sin afirmaciones de acciones no ejecutadas | `pytest` 193 passed; real con Qwen: aprobar guarda la nota, rechazar no |
+| 2026-11-15 | Interfaz web Fase 1: chat con cinta de estados SSE, permiso de trabajo, paneles de sistema/conocimiento/conectores; endpoints de conversaciones; build servido por FastAPI | `pytest` 196 passed; `npm run build` OK; probado en navegador (escritorio y móvil) |

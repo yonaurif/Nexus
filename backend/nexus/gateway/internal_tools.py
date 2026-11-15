@@ -16,8 +16,8 @@ TIME_NOW = ToolManifest(
 )
 NOTES_CREATE = ToolManifest(
     tool_id="notes.create", connector_id="internal", version="1.0.0",
-    description="Guarda una nota del propietario (título y texto) en su base de conocimiento. "
-                "Escritura reversible: requiere su aprobación.",
+    # La descripción entra en el prompt: sin "requiere aprobación", que el modelo repetía en su respuesta.
+    description="Guarda una nota del propietario (título y texto) en su base de conocimiento (escritura reversible).",
     input_schema={"type": "object", "properties": {"title": {"type": "string"}, "text": {"type": "string"}},
                   "required": ["title", "text"]},
     output_schema={"type": "object", "required": ["document_id"]},
