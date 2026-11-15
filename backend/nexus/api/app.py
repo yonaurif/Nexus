@@ -19,12 +19,13 @@ from nexus.config import env
 from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
-from nexus.core import approvals, hardware, pipeline, task_store
+from nexus.core import approvals, classifier, hardware, pipeline, task_store
 from nexus.core.state import TaskStatus as S
 from nexus.gateway import connectors, internal_tools
 from nexus.gateway.registry import SqlToolRegistry
 from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
+from nexus.learning import registry
 from nexus.memory import episodes
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
@@ -76,6 +77,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         adapters = {**internal_tools.build_adapters(engine, embedder), **external_adapters}
     if start_scheduler:
         _start_sync_scheduler(engine, embedder)
+        registry.activate_intent(engine)  # IA propia promovida, si la hay; si no, reglas
 
     app = FastAPI(title="NEXUS API", version="0.2.0")
 
@@ -320,6 +322,24 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         return {"status": "ok" if ok else "degraded",
                 "components": {"database": db, "model": model_info, "embeddings": emb,
                                "hardware": hardware.get_hardware_info()}}
+
+    # --- IA propia: modelos entrenados (Text Learning §8, §11; Learning Center Doc 04 §10) ---
+    @app.get("/api/v1/learning/models")
+    def learning_models(owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return {"models": registry.list_models(c), "active_intent": bool(classifier.active_model())}
+
+    @app.post("/api/v1/learning/models/{model_id}/promote")
+    def promote_model(model_id: str, owner: str = Depends(auth)):
+        try:
+            with engine.begin() as c:
+                registry.promote(c, model_id)
+                c.execute(sa.text("INSERT INTO audit_events (actor_type, actor_id, action, entity_type, entity_id) "
+                                  "VALUES ('owner', :o, 'model.promoted', 'model', :m)"), {"o": owner, "m": model_id})
+        except registry.RegistryError as e:
+            raise HTTPException(404 if e.code == "MODEL_NOT_FOUND" else 409, e.code)
+        loaded = registry.activate_intent(engine)
+        return {"model_id": model_id, "status": "active", "loaded": loaded}
 
     # --- Conversaciones (Doc 04 §9.1) ---
     @app.get("/api/v1/chat/conversations")

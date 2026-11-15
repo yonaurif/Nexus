@@ -16,7 +16,7 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 196 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 209 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000   # API + interfaz en http://127.0.0.1:8000
 cd ../frontend && npm install && npm run build   # genera frontend/dist, que sirve el backend (o `npm run dev` en :5173 con proxy)
 # Modelo (en .env o entorno; sin servicios externos):
@@ -24,6 +24,7 @@ cd ../frontend && npm install && npm run build   # genera frontend/dist, que sir
 #   NEXUS_EMBED_MODEL_DIR=<snapshot HF de paraphrase-multilingual-MiniLM-L12-v2>  (activo; ONNX, pip install -e ".[embeddings]")
 #   OCR: Tesseract en C:\Program Files\Tesseract-OCR (auto) + backend/tessdata (spa/eng/osd, copiado de Primitivo, no se sube)
 #   GitHub (opcional): NEXUS_GITHUB_TOKEN=<fine-grained, solo lectura>; sin token: repos públicos, 60 peticiones/h
+#   IA propia: pip install -e ".[learning]"; entrenar: .venv/Scripts/python.exe -m nexus.learning.train_intent [--promote]
 #   carpetas: NEXUS_FOLDER_ROOTS=C:/ruta1;C:/ruta2  (raíces autorizadas; sin esto no se puede registrar ninguna)
 #   reindexar vectores tras cambiar de embedder: .venv/Scripts/python.exe -m nexus.knowledge.reindex
 #   reinstalar con CUDA (en ESTE equipo; en otro, su arquitectura o sin -DCMAKE_CUDA_ARCHITECTURES): CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
@@ -307,11 +308,25 @@ Fallos encontrados probando en navegador, corregidos: (1) crear conversación re
 
 Diferido: auth con sesiones/roles (Fase 4; hoy token en sessionStorage), UI declarativa por esquemas para resultados de herramientas (Fase 3), layouts personalizables, Learning Center (Fase 5), tests de componentes.
 
-### ⬜ T0/T1 — Text Learning (doc TL §12)
+### ✅ T0/T1 — Text Learning: clasificador de intención propio (HECHO) (doc TL §4–8, §12)
 
-- [ ] Esquema JSONL + taxonomía de intenciones (clases de Doc 02 §4)
-- [ ] Baseline TF-IDF + LogisticRegression con abstención → señal para el Intent Classifier del Core
+- [x] **T0** `backend/nexus/learning/dataset.py`: esquema JSONL estricto (procedencia, permiso, idioma, tarea, etiqueta, revisión), solo `approved`, **secretos rechazados** (`redact`), normalización NFC conservadora, dedupe tras normalizar, partición estratificada determinista sin solapes, manifiesto con hash = versión del dataset.
+- [x] `backend/data/intent/intent_es_v1.jsonl`: **183 ejemplos sintéticos** en español, 8 clases del Doc 02 §4 (20–25 por clase), marcados `synthetic`. **Pendiente: revisión del propietario** (TL §6.1) y añadir ejemplos reales.
+- [x] **T1** `backend/nexus/learning/intent.py`: TF-IDF palabras (1–2) + caracteres (2–5) → LogisticRegression equilibrada; umbral de abstención calibrado en validación (suelo 0,30); informe en el test bloqueado (macro-F1, P/R/F1 por clase, matriz de confusión, cobertura) + CV 5 particiones + línea base de reglas.
+- [x] Artefacto joblib fuera de git (`backend/artifacts/`) con **sha256 verificado antes de deserializar** (pickle).
+- [x] `migrations/versions/0006_model_registry.py` + `nexus/learning/registry.py`: candidato → activo solo si **el híbrido supera a las reglas** en el test; un activo por tarea; retirada.
+- [x] `nexus/core/classifier.py` híbrido: modelo activo si está seguro → reglas explícitas → `conversation` (vía segura). Corroboración inspirada en Primitivo `source_router.py` (allí con LLM).
+- [x] CLI `python -m nexus.learning.train_intent [--promote]`; API `GET /api/v1/learning/models`, `POST /api/v1/learning/models/{id}/promote` (auditado, se activa sin reiniciar); el servidor carga el activo al arrancar.
+- [x] Tests: `test_learning.py` (13).
+- [x] **Entrenamiento real:** híbrido macro-F1 **0,649** vs reglas **0,440** en el test bloqueado (36 ejemplos); CV 0,681 ± 0,065; solo modelo 0,563; cobertura 78 %, acierto en lo aceptado 71 % (objetivo 90 % no alcanzado). Registrado (`mdl_d37c84b2…`) y **promovido a activo por decisión del propietario** (auditado); el servidor lo carga al arrancar verificando su hash.
 
+Lectura honesta: supera a las reglas, pero con 119 ejemplos de entrenamiento es débil (`conversation` F1 0 en el test: es la clase más heterogénea). El salto real vendrá de ejemplos reales: siguiente paso natural **T5** (feedback del chat → staging → revisión → reentrenar).
+
+### ⬜ T2–T5 — Transformer compacto, LoRA y aprendizaje continuo gobernado (doc TL §12)
+
+- [ ] T5 antes que T3/T4: capturar correcciones del chat como `feedback_events` → staging → revisión → nuevo dataset versionado.
+- [ ] T3: encoder multilingüe compacto como experimento controlado frente a este baseline.
+- [ ] T4: LoRA sobre el LLM local (depende del hardware del equipo de producción, D19).
 ### ⬜ M3–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
 
 Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobaciones (C5).
@@ -374,6 +389,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D24 | IA propia de intención: TF-IDF+LR con abstención; híbrido con reglas; promoción solo si supera a las reglas y por decisión del propietario; artefactos con hash | Adoptada | TL §4.3, §7, §8 |
 | D23 | Interfaz: React+TS+Vite servida por el propio backend (un puerto), fuentes locales, sin HTML del modelo, token de instancia en sessionStorage hasta Fase 4 | Adoptada | Doc 04 §5.5, §13 |
 | D22 | Aprobaciones con argumentos en servidor + hash, TTL 15 min, consumo único al ejecutar; el Planner usa JSON por gramática; nunca se afirman acciones no ejecutadas | Adoptada | Doc 02 §11, Doc 05 §11 |
 | D21 | Conectores externos: solo vía `http_safe` (IP fijada, allowlist por conector), solo GET hasta C5, en `review` hasta aprobación del propietario; fallo total de herramientas → respuesta en código | Adoptada | Doc 05 §3, §7, §8.1 |
@@ -408,3 +424,5 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | G1: `http_safe` (portado del Worker), adaptador REST, conector GitHub readonly en revisión + API de aprobación; sin respuesta inventada si fallan las herramientas | `pytest` 181 passed; real contra api.github.com: repo y lista de repos con fuentes |
 | 2026-11-15 | C5: aprobaciones ligadas a parámetros exactos, caducidad, consumo único, cancelación cooperativa, `notes.create`; Planner con JSON por gramática; sin afirmaciones de acciones no ejecutadas | `pytest` 193 passed; real con Qwen: aprobar guarda la nota, rechazar no |
 | 2026-11-15 | Interfaz web Fase 1: chat con cinta de estados SSE, permiso de trabajo, paneles de sistema/conocimiento/conectores; endpoints de conversaciones; build servido por FastAPI | `pytest` 196 passed; `npm run build` OK; probado en navegador (escritorio y móvil) |
+| 2026-11-15 | T0/T1: dataset gobernado, clasificador de intención propio (TF-IDF+LR), registro y promoción de modelos, clasificador híbrido | `pytest` 209 passed; entrenado: híbrido 0,649 vs reglas 0,440 (candidato, sin promover) |
+| 2026-11-15 | Modelo de intención `mdl_d37c84b2…` promovido a activo por el propietario | carga con hash verificado; "¿qué sabes del NAS?" → knowledge_query |

@@ -13,6 +13,8 @@ gguf = ["llama-cpp-python>=0.3"]
 embeddings = ["onnxruntime>=1.18", "tokenizers>=0.19", "numpy>=1.26"]
 # Extracción de documentos + OCR (requiere el binario de Tesseract instalado aparte)
 documents = ["pymupdf>=1.24", "pytesseract>=0.3.10", "pillow>=10", "python-docx>=1.1", "openpyxl>=3.1"]
+# IA propia: clasificadores entrenados (Text Learning T1)
+learning = ["scikit-learn>=1.5", "joblib>=1.4"]
 
 [tool.setuptools.packages.find]
 include = ["nexus*"]
