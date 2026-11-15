@@ -6,13 +6,17 @@
 
 **Arquitectura:** backend Python (FastAPI más adelante) con contratos Pydantic `extra=forbid`; Core (Planner/Validator/Executor/Verifier) que **solo** alcanza herramientas a través del Gateway (Tool Registry con hash aprobado); memoria en PostgreSQL + pgvector; frontend React+TS que solo habla con el Backend API.
 
-**Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
+**Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · FastAPI 0.163 · uvicorn 0.54 · httpx 0.28 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
+
+**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). Ollama **no instalado**.
 
 **Arranque local:**
 ```bash
-docker compose up -d db                      # .env en la raíz con NEXUS_DB_PASSWORD (no se sube)
+docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q        # 21 passed (los de DB se saltan si Postgres no está)
+.venv/Scripts/python.exe -m pytest -q                              # 41 passed
+.venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
+# Opcional, modelo local: NEXUS_OLLAMA_MODEL=<modelo> (y NEXUS_OLLAMA_URL si no es :11434)
 ```
 
 ---
@@ -33,10 +37,23 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 ## 2. Mapa de conexiones (cómo está cableado)
 
 ```text
-            [Frontend React]  ── HTTPS/SSE ──>  [Backend API]          (pendiente: Fase 1 / C1)
-                                                     │
-                                                     v
-  nexus/core/state.py  <── estado de tarea ──  [Orchestrator]           (pendiente: C2)
+            [Frontend React]  (pendiente: Fase 1 de Doc 04)
+                  │ HTTPS + Bearer NEXUS_API_TOKEN / SSE
+                  v
+  nexus/api/app.py  create_app(engine, model, token)                  ✅ HECHO (C1)
+     POST /api/v1/chat/messages  → 202 {task_id, conversation_id, correlation_id}
+     GET  /api/v1/tasks/{id}      → TaskView + AssistantResponse
+     GET  /api/v1/tasks/{id}/events → SSE (id = execution_events.id, soporta Last-Event-ID)
+     GET  /api/v1/system/health   → database + model (estados reales)
+                  │ BackgroundTasks
+                  v
+  nexus/core/pipeline.py  run()                                       ✅ HECHO (C1)
+     classifier.classify → _context (últimos 10 mensajes + SYSTEM_PROMPT)
+     → Plan(1 paso synthesis) → validate_plan → models.generate → verificar → messages
+                  │                                  │
+                  │                   nexus/core/models.py  StubModel | OllamaModel ✅
+                  v
+  nexus/core/state.py  <── estado de tarea ──  [Orchestrator real]    (pendiente: C2)
         ^ transition()
         │
   nexus/core/task_store.py  create_task / set_status / get_status    ✅ HECHO (M0)
@@ -61,7 +78,8 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
             v
   docker-compose.yml → PostgreSQL 16 + pgvector 127.0.0.1:5432
      tablas: memory_sources, tasks, plans, plan_steps, tools,
-             tool_executions, execution_events, audit_events
+             tool_executions, execution_events, audit_events,
+             conversations, messages (0002)
 ```
 
 **Conexiones reales en código hoy:**
@@ -73,6 +91,10 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 6. `execution_events` y `audit_events` rechazan UPDATE/DELETE con un trigger en la DB (no solo en código). → Doc 03 §3.1.
 7. `validate_plan` funciona igual con `SqlToolRegistry`; el hash se recalcula desde el manifest guardado, no se confía en la columna. → Doc 05 §8.5.
 8. `tool_executions` guarda solo `arguments_hash`, nunca argumentos en claro; `memory_sources.auth_ref` es una referencia, nunca el secreto. → Doc 05 §18, Doc 03 §7.1.
+9. La API crea conversación + mensaje de usuario + tarea en **una** transacción y lanza `pipeline.run` en segundo plano; cada transición del pipeline se confirma por separado, así el SSE las ve en tiempo real. → Doc 04 §3.3, §9.2.
+10. El clasificador solo enruta: `unknown` → `needs_input` sin llamar al modelo; clases sin capacidad todavía → respuesta + `partial` con `CAPABILITY_UNAVAILABLE`. → Doc 02 §4, §6.3.
+11. Fallo de modelo → tarea `failed`, aviso `MODEL_UNAVAILABLE`, detalle solo en logs; `StubModel` → `partial` con `MODEL_NOT_CONFIGURED`. Nunca éxito aparente. → Doc 02 aceptación #8.
+12. Token comparado con `secrets.compare_digest`; conversaciones y tareas filtradas por `owner_id` (404 si no son tuyas). → Doc 04 §11.
 
 ## 3. Skills / herramientas usadas para iniciar
 
@@ -114,12 +136,20 @@ Verificar: `cd backend && python -m pytest -q` → `14 passed`.
 
 Pendiente de M0 que se difiere: `plans`/`plan_steps`/`tool_executions` tienen tabla pero aún no repositorio (entran con C2, cuando haya Executor que los escriba).
 
-### ⬜ C1 — Core conversacional (Doc 02 §18, Doc 04 Fase 1)
+### ✅ C1 — Core conversacional (HECHO) (Doc 02 §18, Doc 04 Fase 1)
 
-- [ ] FastAPI: `POST /api/v1/chat/messages`, `GET /api/v1/tasks/{id}`, `GET /api/v1/system/health`
-- [ ] Contratos `ChatRequest`, `Task`, `AssistantResponse`, `CoreEvent` en `contracts.py`
-- [ ] Model Router con interfaz única (`generate(prompt, profile)`) y un adaptador local (Ollama) — **pendiente hardware CPU/GPU/VRAM**
-- [ ] SSE para `assistant.status.changed`
+- [x] `backend/nexus/config.py` — `env()` con respaldo en `.env`
+- [x] `backend/migrations/versions/0002_conversations.py` — `conversations`, `messages`
+- [x] Contratos `ChatRequest`, `ChatAccepted`, `AssistantResponse`, `TaskView`, `CoreEvent`, `RequestClass`
+- [x] `backend/nexus/core/classifier.py` — reglas por palabras clave con abstención (se sustituye en T1)
+- [x] `backend/nexus/core/models.py` — Model Router: `StubModel` (por defecto) y `OllamaModel` (con `NEXUS_OLLAMA_MODEL`)
+- [x] `backend/nexus/core/pipeline.py` — classify → context → plan → validate → run → verify → responder
+- [x] `backend/nexus/api/app.py` — 4 endpoints, auth Bearer, SSE con reconexión
+- [x] `backend/tests/test_c1_api.py` — 20 tests; prueba manual con uvicorn + curl (health, 401, chat, 9 eventos SSE, tarea)
+
+Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real; presupuesto de contexto por tokens → cuando haya tokenizador del modelo elegido.
+
+**Siguiente paso de modelo (D6):** con 8 GB de VRAM caben modelos de 7–8B en Q4 (unos 5 GB). Instalar Ollama y probar un modelo multilingüe pequeño antes de fijarlo.
 
 ### ⬜ C2 — Planner/Executor/Verifier (Doc 02 §6–8)
 
@@ -155,8 +185,10 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | D9 | SQL explícito con `sa.text` (SQLAlchemy Core), sin ORM; migraciones Alembic en SQL plano | Adoptada | ponytail / Doc 03 §7 |
 | D10 | Append-only forzado por trigger en Postgres | Adoptada | Doc 03 §3.1 |
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
-| D6 | Modelo LLM/embeddings | **Pendiente** (falta CPU/GPU/VRAM) | Doc 02 §10, Doc 03 §8.1 |
-| D7 | SSE vs WebSocket | SSE inicial propuesto | Doc 04 §13 |
+| D6 | Modelo LLM/embeddings | **Pendiente**: hardware ya conocido (RTX 3050 8 GB); falta instalar Ollama y comparar | Doc 02 §10, Doc 03 §8.1 |
+| D7 | SSE para estados de tarea (servidor → cliente), con id de `execution_events` | Adoptada (C1) | Doc 04 §9.2 |
+| D11 | Auth inicial: un token Bearer por instancia (`NEXUS_API_TOKEN`), un único propietario | Temporal hasta Fase 4 | Doc 04 §11 |
+| D12 | Procesado en `BackgroundTasks` de FastAPI; cola durable (Redis Streams) cuando haya agentes | Temporal | Doc 05 §15 |
 | D8 | Secret store, cola (Redis Streams), versión MCP SDK | **Pendiente** | Doc 05 §22 |
 
 ## 6. Registro
@@ -167,3 +199,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | C0+G0: contratos, estados, validador, registry; compose de Postgres | `pytest` 14 passed; `docker compose config` OK |
 | 2026-11-15 | Repo conectado a GitHub: `origin` → https://github.com/yonaurif/Nexus (rama `main`) | `git push -u origin main` |
 | 2026-11-15 | M0: Postgres+pgvector levantado, migración 0001, task_store, SqlToolRegistry | `pytest` 21 passed contra Postgres real; `alembic downgrade base` + `upgrade head` OK |
+| 2026-11-15 | C1: API FastAPI, pipeline conversacional, clasificador, Model Router, SSE, migración 0002 | `pytest` 41 passed; uvicorn + curl de punta a punta |

@@ -65,6 +65,46 @@ class Evidence(Strict):
     retrieved_at: datetime
 
 
+RequestClass = Literal["conversation", "knowledge_query", "task_request", "agent_request",
+                       "memory_update", "feedback", "rule_proposal", "system_admin", "unknown"]
+
+
+class ChatRequest(Strict):
+    message: str = Field(min_length=1, max_length=8000)
+    conversation_id: str | None = None
+    locale: str = "es"
+
+
+class ChatAccepted(Strict):
+    task_id: str
+    conversation_id: str
+    correlation_id: str
+
+
+class AssistantResponse(Strict):
+    text: str
+    task_status: str
+    warnings: list[str] = []
+    sources: list[Evidence] = []
+
+
+class TaskView(Strict):
+    task_id: str
+    status: str
+    correlation_id: str
+    response: AssistantResponse | None = None
+
+
+class CoreEvent(Strict):
+    event_id: str
+    event_type: str
+    occurred_at: datetime
+    correlation_id: str
+    entity_id: str
+    schema_version: str
+    payload: dict[str, Any]
+
+
 class ToolResult(Strict):
     invocation_id: str
     status: Literal["succeeded", "failed", "partial"]
