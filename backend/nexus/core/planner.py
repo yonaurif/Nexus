@@ -35,7 +35,8 @@ def propose(model, task_id: str, message: str, tools: list[ToolManifest], versio
                            "input_schema": t.input_schema} for t in tools], ensure_ascii=False)
     user = message if not feedback else f"{message}\n\nEl intento anterior falló: {feedback}"
     try:
-        raw = model.generate([{"role": "system", "content": PLANNER_PROMPT.format(tools=catalog)},
+        gen = getattr(model, "generate_json", None) or model.generate  # JSON por gramática si el modelo lo admite
+        raw = gen([{"role": "system", "content": PLANNER_PROMPT.format(tools=catalog)},
                               {"role": "user", "content": user}])
     except Exception:
         raise PlanRejected("MODEL_UNAVAILABLE") from None
@@ -49,6 +50,18 @@ def propose(model, task_id: str, message: str, tools: list[ToolManifest], versio
     return Plan(plan_id=f"plan_{task_id}_{version}", task_id=task_id, goal=message[:200],
                 summary_for_user=p.summary_for_user, steps=p.steps, limits=DEFAULT_LIMITS,
                 plan_version=version)
+
+
+def load_plan(engine, task_id: str) -> Plan:
+    """Última versión del plan guardado de una tarea (para reanudar tras una aprobación)."""
+    with engine.connect() as c:
+        p = c.execute(sa.text("SELECT p.id, p.version, p.summary, p.limits, t.goal FROM plans p "
+                              "JOIN tasks t ON t.id = p.task_id WHERE p.task_id=:t ORDER BY p.version DESC LIMIT 1"),
+                      {"t": task_id}).one()
+        steps = c.execute(sa.text("SELECT step_id, kind, tool_id, depends_on, input, success_criteria "
+                                  "FROM plan_steps WHERE plan_id=:p ORDER BY step_id"), {"p": p.id}).all()
+    return Plan(plan_id=p.id, task_id=task_id, goal=p.goal, summary_for_user=p.summary, limits=p.limits,
+                plan_version=p.version, steps=[PlanStep(**s._asdict()) for s in steps])
 
 
 def save_plan(engine, plan: Plan) -> None:

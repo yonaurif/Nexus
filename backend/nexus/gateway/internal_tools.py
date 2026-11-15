@@ -14,7 +14,16 @@ TIME_NOW = ToolManifest(
     output_schema={"type": "object", "required": ["utc_iso"]},
     risk_level="read", required_scopes=["system.time.read"], timeout_ms=1000,
 )
-INTERNAL_TOOLS = [TIME_NOW]
+NOTES_CREATE = ToolManifest(
+    tool_id="notes.create", connector_id="internal", version="1.0.0",
+    description="Guarda una nota del propietario (título y texto) en su base de conocimiento. "
+                "Escritura reversible: requiere su aprobación.",
+    input_schema={"type": "object", "properties": {"title": {"type": "string"}, "text": {"type": "string"}},
+                  "required": ["title", "text"]},
+    output_schema={"type": "object", "required": ["document_id"]},
+    risk_level="write_reversible", required_scopes=["notes.write"], timeout_ms=30_000, idempotent=True,
+)
+INTERNAL_TOOLS = [TIME_NOW, NOTES_CREATE]
 
 
 def internal_adapter(tool_id: str, arguments: dict) -> dict:
@@ -25,7 +34,27 @@ def internal_adapter(tool_id: str, arguments: dict) -> dict:
     raise KeyError(tool_id)
 
 
-ADAPTERS = {"internal": internal_adapter}
+ADAPTERS = {"internal": internal_adapter}  # solo herramientas sin estado (tests y arranque mínimo)
+
+
+def build_adapters(engine, embedder) -> dict:
+    """Adaptadores internos que necesitan la base de datos (notes.create)."""
+    from nexus.gateway.registry import GatewayError
+    from nexus.knowledge import store
+
+    def internal(tool_id: str, arguments: dict, ctx: dict | None = None) -> dict:
+        if tool_id != "notes.create":
+            return internal_adapter(tool_id, arguments)
+        title, text = arguments.get("title"), arguments.get("text")
+        if not (isinstance(title, str) and isinstance(text, str) and title.strip() and text.strip()):
+            raise GatewayError("INPUT_INVALID", "title y text deben ser texto no vacío")
+        # Idempotente: mismo contenido -> mismo documento (dedupe por hash); la clave queda en uri_ref.
+        r = store.ingest_document(engine, ctx["owner_id"], title=title[:300], text=text[:20_000], embedder=embedder,
+                                  uri_ref=f"note://{ctx['idempotency_key']}", source_type="note")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return {"data": {"document_id": r.document_id, "chunks": r.chunks, "deduplicated": r.deduplicated},
+                "evidence": [{"source_ref": f"doc:{r.document_id}#0", "retrieved_at": now}]}
+    return {"internal": internal}
 
 
 def seed(conn) -> None:

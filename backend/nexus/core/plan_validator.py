@@ -39,9 +39,10 @@ def validate_plan(plan: Plan, registry) -> None:
             m = registry.resolve(s.tool_id or "")
         except GatewayError as e:
             raise PlanRejected(f"{e.code}: {s.tool_id}") from None
-        # ponytail: sin servicio de aprobaciones hasta C5, solo herramientas de lectura
-        if m.risk_level != "read" or m.requires_approval:
-            raise PlanRejected(f"APPROVAL_REQUIRED: {s.tool_id} ({m.risk_level})")
+        # Doc 05 §6.2: `admin` nunca está disponible para el Core ni para agentes ordinarios.
+        # Escrituras sí, pero el pipeline pide aprobación y el Executor la consume al ejecutar (C5).
+        if m.risk_level == "admin":
+            raise PlanRejected(f"POLICY_DENIED: {s.tool_id} (admin)")
         # ponytail: solo 'required'; validación JSON Schema completa (jsonschema) en G1
         missing = set(m.input_schema.get("required", [])) - s.input.keys()
         if missing:

@@ -16,7 +16,7 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 181 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 193 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=a.gguf;b.gguf   (cadena con respaldo, en orden de preferencia; NEXUS_GGUF_GPU_LAYERS=auto|N; NEXUS_GGUF_CTX)
@@ -273,6 +273,23 @@ Diferido: grafo semántico (M3), procedimientos (M4), consolidación/olvido/expi
 
 Diferido: vuelta automática al modelo principal (Primitivo la tiene), elección por tipo de tarea (Doc 02 §10), catálogo descargable del Worker.
 
+### ✅ C5 — Aprobaciones y cancelación (HECHO) (Doc 02 §11, §18; Doc 05 §6.2, §10–11)
+
+- [x] `backend/migrations/versions/0005_approvals.py` — `approvals` (argumentos en servidor + `arguments_hash`, caducidad, estados pending/approved/rejected/expired/consumed).
+- [x] `backend/nexus/core/approvals.py` — patrón de Primitivo `gala/actions.py` (proponer → tarjeta → decisión → re-validar en servidor) endurecido: el cliente nunca reenvía parámetros; TTL 15 min; decisión única con auditoría; **consumo único en el instante de ejecutar y solo si el hash coincide**.
+- [x] Política: `read` sin aprobación; `write_reversible`/`write_external`/`destructive` o `requires_approval` → `awaiting_approval`; `admin` → `POLICY_DENIED` siempre.
+- [x] Pipeline: pausa en `plan_validating → awaiting_approval` con tarjeta (herramienta, riesgo, parámetros, caducidad); `resume()` tras aprobar todo (sin replanificar: una escritura no se repite); `abort()` para rechazo (`cancelled`), caducidad (`expired`) y cancelación.
+- [x] Cancelación cooperativa (Doc 02 §11.2): `POST /api/v1/tasks/{id}/cancel`; en espera → `cancelled` al momento; en marcha → `cancel_requested` y el pipeline/Executor se cortan en el siguiente paso (`CANCELLED`); avisa de que lo ya enviado fuera puede no ser reversible.
+- [x] Executor: pasa `ctx` (task_id, owner_id, `idempotency_key`) a adaptadores que lo aceptan.
+- [x] Herramienta de escritura interna `notes.create` (`write_reversible`, idempotente por hash de contenido).
+- [x] API: `GET /api/v1/approvals?status=`, `POST /api/v1/approvals/{id}/decision` (`approve|reject`); SSE termina en `awaiting_approval`.
+- [x] **Planner con JSON por gramática** (`generate_json` → `response_format=json_object` de llama.cpp). Medido: sin ella, Qwen devolvió un plan no parseable ante comillas «».
+- [x] **Nunca afirma acciones no ejecutadas**: petición de acción sin plan válido → respuesta fija sin LLM; síntesis sin herramientas → instrucción explícita. Medido: Qwen respondió "He creado la nota" sin haber ejecutado nada.
+- [x] Tests: `test_c5.py` (11) + JSON por gramática en `test_router.py`.
+- [x] Prueba real con Qwen: nota → aprobación pendiente → aprobar → nota guardada y consultable ("3 de marzo, equipo de sistemas"); otra nota rechazada → no se guarda; auditoría `approval.approved/rejected`.
+
+Diferido: aprobación en la interfaz (tarjeta UI, Fase 4 de Doc 04), sesión administrativa reforzada para aprobar (Doc 05 §6.2), generador de documentos Word/Excel/PDF (§4b prioridad 8) como siguiente herramienta de escritura.
+
 ### ⬜ T0/T1 — Text Learning (doc TL §12)
 
 - [ ] Esquema JSONL + taxonomía de intenciones (clases de Doc 02 §4)
@@ -316,7 +333,7 @@ Fuente: `C:\Users\YonaPc\Documents\GitHub\Primitivo proyecto`. Versiones revisad
 | 6 | Métricas por fase y modelo (Doc 02 §13 `model_invocations`, §15) | `core/perf_log.py` (JSONL), timings de `gala/llm.py` | En NEXUS a tabla `model_invocations` (latencia, tokens, modelo) en vez de JSONL | `test_performance.py` |
 | 7 | Credential Broker / secretos cifrados (Doc 05 §4.1, G3; Doc 03 §11 payloads cifrados) | `core/crypto.py` (AES-GCM: `encrypt_secret`, claves por fichero) | `credential_ref` → secreto cifrado con clave maestra fuera de la DB | `test_crypto.py` |
 | 8 | Generación de documentos Word/Excel/PDF desde texto (herramienta del Core) | `gala/document_generator.py` (plantillas deterministas, sin ejecutar código) | Herramienta interna `documents.generate` (`write_reversible`, archivo en almacenamiento de NEXUS); entra con C5 (aprobaciones) | `test_document_generator.py` |
-| 9 | Aprobación de acciones: proponer → tarjeta → confirmar → re-validar permiso (Doc 05 §11 · C5) | `gala/actions.py` (patrón `proposed_action` + `/actions/execute` con re-chequeo) | Solo el **patrón**; se implementa sobre `approvals` + `arguments_hash` del Doc 05 | `test_gala_actions.py` (como referencia) |
+| 9 ✅ | Aprobación de acciones: proponer → tarjeta → confirmar → re-validar permiso (Doc 05 §11 · C5) — **adoptado el patrón y endurecido** | `gala/actions.py` (patrón `proposed_action` + `/actions/execute` con re-chequeo) | Solo el **patrón**; se implementa sobre `approvals` + `arguments_hash` del Doc 05 | `test_gala_actions.py` (como referencia) |
 | 10 | Auth real con perfiles (Doc 04 §11 · Fase 4) | `packages/primitivo-core` (JWT, TOTP) + `core/security.py` | Sustituye el token único `NEXUS_API_TOKEN` (D11) | tests de `primitivo-core` |
 | 11 | Ejecución de código en sandbox (Doc 02 §8 Trusted Services · C6) | Worker `sandbox.py` (audit hook: sin procesos/ctypes/red; FS restringido) + `environments.py` | **Bloqueado por decisión:** el Doc 02 §1.2 prohíbe ejecutar código generado por el modelo. Solo sería válido para procedimientos aprobados (M4) o con aprobación humana explícita. Requiere decisión del propietario | `test_sandbox.py`, `test_sandbox_escapes.py` |
 | 12 | Interfaz (Doc 04 · Fase 1) | `client/` Electron 29 + React 19 + Vite (chat, KB, tema Sneat) | Candidato para la UI de NEXUS; es JSX (no TS) y está acoplado a la API de Primitivo: reutilizar componentes de chat/KB, no la app entera | tests de cliente (`tests-unit/`) |
@@ -339,6 +356,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D22 | Aprobaciones con argumentos en servidor + hash, TTL 15 min, consumo único al ejecutar; el Planner usa JSON por gramática; nunca se afirman acciones no ejecutadas | Adoptada | Doc 02 §11, Doc 05 §11 |
 | D21 | Conectores externos: solo vía `http_safe` (IP fijada, allowlist por conector), solo GET hasta C5, en `review` hasta aprobación del propietario; fallo total de herramientas → respuesta en código | Adoptada | Doc 05 §3, §7, §8.1 |
 | D20 | Modelos: cadena con respaldo y capas en GPU automáticas según el equipo; el razonamiento `<think>` nunca sale | Adoptada | D19, Doc 02 §10, §15 |
 | D17 | Carpetas: solo bajo `NEXUS_FOLDER_ROOTS`; archivos con nombre de secreto nunca se leen; planificador en hilo propio (no APScheduler) | Adoptada | Doc 02 §16, Doc 04 §11 |
@@ -369,3 +387,4 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | Portado de Primitivo-f25: carpetas sincronizadas (manifiesto, pasadas, planificador) con raíces autorizadas y exclusión de archivos de credenciales; ruta de títulos en chunks; filtro por entidades | `pytest` 111 passed; carpeta real: cambios y borrados detectados, Qwen responde "9700" y se abstiene sobre Primitivo Suite |
 | 2026-11-15 | Portado del Worker: detección de hardware, capas GPU automáticas, cadena de modelos con respaldo; health con hardware real; filtrado de `<think>` | `pytest` 122 passed; real: 26 capas con 5,15 GB VRAM libre; GGUF corrupto → Qwen3-4B |
 | 2026-11-15 | G1: `http_safe` (portado del Worker), adaptador REST, conector GitHub readonly en revisión + API de aprobación; sin respuesta inventada si fallan las herramientas | `pytest` 181 passed; real contra api.github.com: repo y lista de repos con fuentes |
+| 2026-11-15 | C5: aprobaciones ligadas a parámetros exactos, caducidad, consumo único, cancelación cooperativa, `notes.create`; Planner con JSON por gramática; sin afirmaciones de acciones no ejecutadas | `pytest` 193 passed; real con Qwen: aprobar guarda la nota, rechazar no |

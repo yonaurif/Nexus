@@ -62,9 +62,11 @@ def test_validator_enforces_global_ceiling():
         validate_plan(plan, reg_with())
 
 
-def test_validator_blocks_non_read_tools_until_approvals_exist():
-    with pytest.raises(PlanRejected, match="APPROVAL_REQUIRED"):
-        validate_plan(make_plan([tool_step("a")]), reg_with(risk_level="write_external"))
+def test_validator_lets_writes_through_to_approval_but_never_admin():
+    """Desde C5 la escritura no se bloquea en validación: la pausa la pone el flujo de aprobación."""
+    validate_plan(make_plan([tool_step("a")]), reg_with(risk_level="write_external"))
+    with pytest.raises(PlanRejected, match="POLICY_DENIED"):
+        validate_plan(make_plan([tool_step("a")]), reg_with(risk_level="admin"))
 
 
 # --- Planner (Doc 02 §6): el modelo propone; el sistema fija límites e IDs ---

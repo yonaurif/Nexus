@@ -163,3 +163,16 @@ def test_reasoning_blocks_are_never_exposed():
     assert strip_reasoning("<THINK>a</THINK>Hola <think>b</think>mundo") == "Hola mundo"
     assert strip_reasoning("Respuesta.<think>razonamiento cortado por max_tokens") == "Respuesta."
     assert strip_reasoning("Sin bloques.") == "Sin bloques."
+
+
+def test_generate_json_uses_grammar_constrained_output(tmp_path):
+    class JsonLlama(FakeLlama):
+        def create_chat_completion(self, messages, **kw):
+            JsonLlama.kw = kw
+            return {"choices": [{"message": {"content": '{"steps": []}'}}]}
+    m = SizedModel(gguf(tmp_path, "j.gguf"), llama_cls=JsonLlama, hardware=hw(), offload=True, block_count=32)
+    fb = FallbackModel([m])
+    assert fb.generate_json(MSGS) == '{"steps": []}'
+    assert JsonLlama.kw["response_format"] == {"type": "json_object"}
+    fb.generate(MSGS)
+    assert "response_format" not in JsonLlama.kw  # la conversación normal no se restringe

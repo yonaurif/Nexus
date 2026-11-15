@@ -1,6 +1,6 @@
 """Executor (Doc 02 §8, Doc 05 §10). Solo invoca herramientas resueltas en el registro en el
 momento de ejecutar; normaliza todo resultado a ToolResult y lo registra sin argumentos en claro."""
-import hashlib
+import inspect
 import json
 import logging
 import time
@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 
 from nexus.contracts import Evidence, Plan, PlanStep, ToolResult
+from nexus.core import approvals
 from nexus.gateway.registry import GatewayError, SqlToolRegistry
 
 log = logging.getLogger("nexus.executor")
@@ -20,11 +21,19 @@ log = logging.getLogger("nexus.executor")
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nexus-tool")
 
 
-def _hash(args: dict) -> str:
-    return "sha256:" + hashlib.sha256(json.dumps(args, sort_keys=True).encode()).hexdigest()
+_hash = approvals.args_hash
 
 
-def _invoke(engine, adapters, step: PlanStep, inv: str, corr: str, budget_s: float):
+def _call(adapter, tool_id: str, args: dict, ctx: dict):
+    """Adaptadores (tool_id, args) o (tool_id, args, ctx): ctx = task_id, owner_id, idempotency_key."""
+    try:
+        takes_ctx = len(inspect.signature(adapter).parameters) >= 3
+    except (TypeError, ValueError):
+        takes_ctx = False
+    return adapter(tool_id, args, ctx) if takes_ctx else adapter(tool_id, args)
+
+
+def _invoke(engine, adapters, plan: Plan, step: PlanStep, inv: str, corr: str, budget_s: float):
     """Devuelve (ToolResult, definition_hash)."""
     def fail(code, ms=0, h=""):
         return ToolResult(invocation_id=inv, status="failed", error={"code": code}, duration_ms=ms,
@@ -33,16 +42,24 @@ def _invoke(engine, adapters, step: PlanStep, inv: str, corr: str, budget_s: flo
     try:  # re-autorización en el instante de ejecución (Doc 02 aceptación #4)
         with engine.connect() as c:
             m = SqlToolRegistry(c).resolve(step.tool_id or "")
+            owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": plan.task_id})
     except GatewayError as e:
         return fail(e.code)
     adapter = adapters.get(m.connector_id)
     if adapter is None:
         return fail("CONNECTOR_NOT_FOUND", h=m.definition_hash)
+    if approvals.needs_approval(m):  # Doc 05 §10.7: aprobación vigente para ESTOS argumentos, de un solo uso
+        with engine.begin() as c:
+            if not approvals.consume(c, plan.task_id, step.step_id, step.input):
+                return fail("APPROVAL_REQUIRED", h=m.definition_hash)
+    ctx = {"task_id": plan.task_id, "owner_id": owner, "correlation_id": corr,
+           "idempotency_key": f"{plan.task_id}:{step.step_id}:{_hash(step.input)}"}
 
     t0 = time.monotonic()
     ms = lambda: int((time.monotonic() - t0) * 1000)
     try:
-        out = _pool.submit(adapter, m.tool_id, dict(step.input)).result(timeout=min(m.timeout_ms / 1000, budget_s))
+        out = _pool.submit(_call, adapter, m.tool_id, dict(step.input), ctx).result(
+            timeout=min(m.timeout_ms / 1000, budget_s))
     except FutureTimeout:
         return fail("TIMEOUT", ms(), m.definition_hash)
     except GatewayError as e:  # el adaptador ya normalizó el error (Doc 05 §14)
@@ -83,10 +100,13 @@ def _record(engine, plan: Plan, step: PlanStep, r: ToolResult, definition_hash: 
                   {"st": r.status, "p": plan.plan_id, "s": step.step_id})
 
 
-def execute(engine, adapters: dict, plan: Plan, correlation_id: str) -> dict[str, ToolResult]:
+def execute(engine, adapters: dict, plan: Plan, correlation_id: str, should_stop=None) -> dict[str, ToolResult]:
+    """`should_stop()`: cancelación cooperativa (Doc 02 §11.2), comprobada antes de cada paso."""
     steps = {s.step_id: s for s in plan.steps}
     deadline = time.monotonic() + plan.limits.max_duration_s
     results: dict[str, ToolResult] = {}
+    failed = lambda inv, code: (ToolResult(invocation_id=inv, status="failed", error={"code": code},  # noqa: E731
+                                           duration_ms=0, correlation_id=correlation_id), "")
     # ponytail: secuencial en orden topológico; paralelismo solo tras validar idempotencia (C6)
     for sid in TopologicalSorter({s.step_id: s.depends_on for s in plan.steps}).static_order():
         step = steps[sid]
@@ -94,14 +114,14 @@ def execute(engine, adapters: dict, plan: Plan, correlation_id: str) -> dict[str
             continue
         inv = f"inv_{uuid.uuid4().hex}"
         left = deadline - time.monotonic()
-        if any(d in results and results[d].status != "succeeded" for d in step.depends_on):
-            r, h = ToolResult(invocation_id=inv, status="failed", error={"code": "DEPENDENCY_FAILED"},
-                              duration_ms=0, correlation_id=correlation_id), ""
+        if should_stop is not None and should_stop():
+            r, h = failed(inv, "CANCELLED")
+        elif any(d in results and results[d].status != "succeeded" for d in step.depends_on):
+            r, h = failed(inv, "DEPENDENCY_FAILED")
         elif left <= 0:
-            r, h = ToolResult(invocation_id=inv, status="failed", error={"code": "BUDGET_EXCEEDED"},
-                              duration_ms=0, correlation_id=correlation_id), ""
+            r, h = failed(inv, "BUDGET_EXCEEDED")
         else:
-            r, h = _invoke(engine, adapters, step, inv, correlation_id, left)
+            r, h = _invoke(engine, adapters, plan, step, inv, correlation_id, left)
         results[sid] = r
         _record(engine, plan, step, r, h)
     return results

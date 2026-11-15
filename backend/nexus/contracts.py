@@ -109,6 +109,10 @@ class DocumentIngested(Strict):
     redactions: list[str]
 
 
+class ApprovalDecision(Strict):
+    decision: Literal["approve", "reject"]
+
+
 class FolderSourceIn(Strict):
     path: str = Field(min_length=1, max_length=1000)
     interval_minutes: int | None = Field(default=None, ge=5, le=10_080)  # None = solo manual

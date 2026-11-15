@@ -16,10 +16,11 @@ from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTP
 from fastapi.responses import StreamingResponse
 
 from nexus.config import env
-from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
+from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
-from nexus.core import hardware, pipeline, task_store
+from nexus.core import approvals, hardware, pipeline, task_store
+from nexus.core.state import TaskStatus as S
 from nexus.gateway import connectors, internal_tools
 from nexus.gateway.registry import SqlToolRegistry
 from nexus.knowledge import extract, sources
@@ -27,7 +28,8 @@ from nexus.knowledge import store as knowledge_store
 from nexus.memory import episodes
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
-STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input"}
+STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input", "awaiting_approval"}
+FINISHED = {"completed", "partial", "failed", "cancelled", "expired"}
 STREAM_MAX_S = 120
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # ponytail: límite fijo; por tipo/propietario cuando haya cuotas
 SYNC_TICK_S = 60
@@ -70,7 +72,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         internal_tools.seed(c)                    # internas: revisadas como código -> aprobadas
         external_adapters = connectors.seed(c)    # externas: quedan en `review` hasta que el propietario apruebe
     if adapters is None:
-        adapters = {**internal_tools.ADAPTERS, **external_adapters}
+        adapters = {**internal_tools.build_adapters(engine, embedder), **external_adapters}
     if start_scheduler:
         _start_sync_scheduler(engine, embedder)
 
@@ -120,6 +122,46 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                                          warnings=msg.metadata.get("warnings", []),
                                          sources=msg.metadata.get("sources", []))
         return TaskView(task_id=t.id, status=t.status, correlation_id=t.correlation_id, response=resp)
+
+    @app.post("/api/v1/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str, owner: str = Depends(auth)):
+        """Doc 02 §11.2: cooperativa. En espera -> cancelada ya; en marcha -> se corta en el próximo paso."""
+        with engine.connect() as c:
+            status = owned_task(c, task_id, owner).status
+        if status in FINISHED:
+            raise HTTPException(409, "TASK_FINISHED")
+        if status in ("awaiting_approval", "needs_input"):
+            pipeline.abort(engine, task_id, S.cancelled, "Tarea cancelada; no se ha ejecutado nada.", "CANCELLED")
+            return {"task_id": task_id, "status": "cancelled"}
+        with engine.begin() as c:
+            task_store.set_status(c, task_id, S.cancel_requested)
+        return {"task_id": task_id, "status": "cancel_requested",
+                "note": "Una acción ya enviada a un sistema externo puede no ser reversible."}
+
+    # --- Aprobaciones (Doc 05 §11) ---
+    @app.get("/api/v1/approvals")
+    def list_approvals(status: str | None = Query(None, pattern="^(pending|approved|rejected|expired|consumed)$"),
+                       owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return {"approvals": approvals.list_for_owner(c, owner, status)}
+
+    @app.post("/api/v1/approvals/{approval_id}/decision")
+    def decide_approval(approval_id: str, body: ApprovalDecision, bg: BackgroundTasks, owner: str = Depends(auth)):
+        try:
+            with engine.begin() as c:
+                task_id = approvals.decide(c, approval_id, owner, body.decision)
+                state = approvals.task_state(c, task_id)
+        except approvals.ApprovalError as e:
+            if e.code == "APPROVAL_EXPIRED":
+                pipeline.abort(engine, e.task_id, S.expired, "La aprobación caducó; no se ha ejecutado nada.",
+                               "APPROVAL_EXPIRED")
+            raise HTTPException(404 if e.code == "APPROVAL_NOT_FOUND" else 409, e.code)
+        if state == "rejected":
+            pipeline.abort(engine, task_id, S.cancelled, "Has rechazado la acción; no se ha ejecutado nada.",
+                           "APPROVAL_REJECTED")
+        elif state == "approved":
+            bg.add_task(pipeline.resume, engine, model, adapters, task_id, embedder)
+        return {"approval_id": approval_id, "decision": body.decision, "task_state": state}
 
     @app.get("/api/v1/tasks/{task_id}/events")
     def task_events(task_id: str, owner: str = Depends(auth),

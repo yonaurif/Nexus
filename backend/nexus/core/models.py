@@ -3,6 +3,7 @@
 Contrato de un modelo (sirve para tu propia IA en Python):
     name: str
     generate(messages: list[{"role": "system"|"user"|"assistant", "content": str}]) -> str
+    generate_json(messages) -> str   (opcional; el Planner lo usa si existe para obtener JSON válido)
     health() -> "ok" | otro estado legible
     configured: bool = True   (opcional; False => el pipeline marca la tarea como parcial)
 
@@ -168,11 +169,17 @@ class LlamaCppModel:
         with self._lock:
             self._llama = None
 
-    def generate(self, messages: list[dict]) -> str:
+    def generate(self, messages: list[dict], json_mode: bool = False) -> str:
         llama = self.load()
+        extra = {"response_format": {"type": "json_object"}} if json_mode else {}
         with self._lock:
-            out = llama.create_chat_completion(messages=messages, max_tokens=self.max_tokens)
+            out = llama.create_chat_completion(messages=messages, max_tokens=self.max_tokens, **extra)
         return strip_reasoning(out["choices"][0]["message"]["content"])
+
+    def generate_json(self, messages: list[dict]) -> str:
+        """Salida restringida por gramática a JSON válido (llama.cpp). Medido: sin ella, Qwen2.5-7B
+        devolvió un plan no parseable ante comillas «» y el Planner tuvo que descartarlo."""
+        return self.generate(messages, json_mode=True)
 
     def health(self) -> str:
         if not self.path.is_file():
@@ -211,7 +218,10 @@ class FallbackModel:
         if self.active is c:
             self.active = None
 
-    def generate(self, messages: list[dict]) -> str:
+    def generate_json(self, messages: list[dict]) -> str:
+        return self.generate(messages, json_mode=True)
+
+    def generate(self, messages: list[dict], json_mode: bool = False) -> str:
         with self._lock:
             order = ([self.active] if self.active else []) + [c for c in self.candidates if c is not self.active]
             for c in order:
@@ -232,7 +242,7 @@ class FallbackModel:
                         continue
                     self.active = c
                 try:
-                    text = c.generate(messages)
+                    text = c.generate(messages, json_mode=json_mode)
                 except ValueError:
                     raise  # petición inválida para cualquier modelo
                 except Exception as e:
