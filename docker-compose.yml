@@ -1,0 +1,12 @@
+# M0 (Doc 03): PostgreSQL + pgvector como fuente de verdad. Solo LAN/localhost.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: nexus
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?define NEXUS_DB_PASSWORD en .env}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [nexus_db:/var/lib/postgresql/data]
+volumes:
+  nexus_db:
