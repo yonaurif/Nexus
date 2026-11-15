@@ -12,7 +12,7 @@
 
 **Equipo de desarrollo (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). CUDA 13.3 + VS 2022 Build Tools. `llama-cpp-python` 0.3.37 **compilado con CUDA** en el venv (`sm_86`, 66 min), `gpu_offload True`. Modelos GGUF en `C:\Worker Primitivo\models` (Qwen2.5-7B, Qwen3-4B, Hermes-3-8B, Yi-1.5-9B, gemma-2-9b, todos Q4_K_M).
 
-**Arranque local:**
+**Arranque local:** doble clic en `iniciar_nexus.bat` (abre Docker si hace falta → base de datos → migraciones → compila la interfaz si no existe → servidor en :8000 → navegador; `iniciar_nexus.bat 8001` para otro puerto). A mano:
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
