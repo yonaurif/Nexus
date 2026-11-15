@@ -101,6 +101,26 @@ def ingest_document(engine, owner_id: str, *, title: str, text: str, embedder, u
     return IngestResult(doc_id, len(chunks), False, found)
 
 
+def reembed_missing(engine, embedder, batch: int = 64) -> int:
+    """Calcula los vectores que faltan en el perfil activo (Doc 03 §8.1: al cambiar de modelo o de
+    truncado se crea perfil nuevo y se reindexa de forma gradual; el perfil anterior no se toca)."""
+    done = 0
+    while True:
+        with engine.begin() as c:
+            profile = ensure_profile(c, embedder)
+            rows = c.execute(sa.text(
+                "SELECT ch.id, ch.heading, ch.text FROM document_chunks ch WHERE NOT EXISTS ("
+                "SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = ch.id AND e.profile_id = :p) "
+                "ORDER BY ch.id LIMIT :n"), {"p": profile, "n": batch}).all()
+            if not rows:
+                return done
+            vectors = embedder.embed([f"{r.heading or ''}\n{r.text}".strip() for r in rows])
+            for r, v in zip(rows, vectors):
+                c.execute(sa.text("INSERT INTO chunk_embeddings (chunk_id, profile_id, embedding) "
+                                  "VALUES (:c, :p, CAST(:v AS vector))"), {"c": r.id, "p": profile, "v": _vec(v)})
+            done += len(rows)
+
+
 _SCOPE = "d.owner_id = :o AND d.status = 'active' AND c.status = 'active'"
 
 

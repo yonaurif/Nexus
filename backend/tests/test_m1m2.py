@@ -261,3 +261,20 @@ def test_strip_routing():
     assert strip_routing("Según mis documentos, ¿qué es Atlas?") == "¿qué es Atlas?"
     assert strip_routing("qué sabes de Atlas") == "Atlas"
     assert strip_routing("hola") == "hola"
+
+
+def test_reembed_missing_fills_new_profile_without_touching_old(engine):
+    o = owner()
+    old = HashEmbedder(dimensions=64)
+    doc = store.ingest_document(engine, o, title="Atlas", text=DOC, embedder=old)
+    new = HashEmbedder(dimensions=32)
+    new.model_version = "2"
+    assert store.reembed_missing(engine, new) >= doc.chunks
+    assert store.reembed_missing(engine, new) == 0  # idempotente
+    with engine.connect() as c:
+        counts = dict(c.execute(sa.text(
+            "SELECT p.dimensions, count(*) FROM chunk_embeddings e JOIN embedding_profiles p ON p.id=e.profile_id "
+            "JOIN document_chunks ch ON ch.id=e.chunk_id WHERE ch.document_id=:d GROUP BY p.dimensions"),
+            {"d": doc.document_id}).all())
+        assert counts == {64: doc.chunks, 32: doc.chunks}
+        assert store.search(c, o, "despliegue Docker", new)  # el perfil nuevo ya busca

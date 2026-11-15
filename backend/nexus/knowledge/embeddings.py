@@ -14,11 +14,13 @@ class OnnxEmbedder:
     """Modelo sentence-transformers exportado a ONNX, mean pooling + L2 (sin torch)."""
     provider = "onnx"
 
-    def __init__(self, model_dir: str, max_tokens: int = 256, batch: int = 32):
+    # 128 = max_seq_length del modelo (sentence_bert_config.json); más allá no se entrenó (visto en f25).
+    def __init__(self, model_dir: str, max_tokens: int = 128, batch: int = 32):
         self.dir = Path(model_dir)
         self.model_name = self.dir.parent.parent.name.removeprefix("models--").replace("--", "/") \
             if self.dir.parent.name == "snapshots" else self.dir.name
-        self.model_version = self.dir.name[:12]  # hash del snapshot de Hugging Face
+        # Snapshot HF + truncado: cambiar cualquiera de los dos da vectores incompatibles -> perfil nuevo.
+        self.model_version = f"{self.dir.name[:12]}-t{max_tokens}"
         self.max_tokens, self.batch = max_tokens, batch
         self._session = self._tok = None
         self._dims: int | None = None

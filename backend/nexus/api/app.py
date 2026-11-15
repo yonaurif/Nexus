@@ -1,25 +1,31 @@
 """Backend API v1 (Doc 04 §9.1). Ejecutar: uvicorn nexus.api.app:app --host 127.0.0.1"""
 import json
+import mimetypes
 import secrets
+import tempfile
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import sqlalchemy as sa
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Response,
+                     UploadFile)
 from fastapi.responses import StreamingResponse
 
 from nexus.config import env
 from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
-                             DocumentIngested, EpisodeView, KnowledgeHit, TaskView)
+                             DocumentIngested, EpisodeView, FileIngested, KnowledgeHit, TaskView)
 from nexus.core import pipeline, task_store
 from nexus.gateway import internal_tools
+from nexus.knowledge import extract
 from nexus.knowledge import store as knowledge_store
 from nexus.memory import episodes
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
 STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input"}
 STREAM_MAX_S = 120
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # ponytail: límite fijo; por tipo/propietario cuando haya cuotas
 
 
 AUTO = object()
@@ -129,6 +135,29 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         r = knowledge_store.ingest_document(engine, owner, title=doc.title, text=doc.text, embedder=embedder,
                                             uri_ref=doc.uri_ref, mime_type=doc.mime_type)
         return DocumentIngested(**vars(r))
+
+    @app.post("/api/v1/knowledge/files", status_code=201, response_model=FileIngested)
+    def ingest_file(file: UploadFile = File(...), title: str | None = Form(None, max_length=300),
+                    owner: str = Depends(auth)):
+        name = Path(file.filename or "archivo").name
+        suffix = Path(name).suffix.lower()
+        if suffix not in extract.SUPPORTED_EXT:
+            raise HTTPException(415, "UNSUPPORTED_TYPE")
+        data = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "FILE_TOO_LARGE")
+        # Archivo temporal propio con la extensión validada; nunca se usa el nombre del cliente como ruta.
+        with tempfile.TemporaryDirectory(prefix="nexus_upload_") as tmp:
+            path = Path(tmp) / f"upload{suffix}"
+            path.write_bytes(data)
+            mime = file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+            got = extract.extract(path, mime, name)
+        if got.error:
+            raise HTTPException(422, got.error)
+        r = knowledge_store.ingest_document(engine, owner, title=title or name, text=got.text,
+                                            embedder=embedder, uri_ref=f"upload://{name}", mime_type=mime,
+                                            source_type="file_upload")
+        return FileIngested(**vars(r), ocr_used=got.ocr_used)
 
     @app.get("/api/v1/knowledge/search")
     def knowledge_search(q: str = Query(min_length=1, max_length=500), k: int = Query(5, ge=1, le=20),

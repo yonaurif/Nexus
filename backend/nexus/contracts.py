@@ -109,6 +109,10 @@ class DocumentIngested(Strict):
     redactions: list[str]
 
 
+class FileIngested(DocumentIngested):
+    ocr_used: bool
+
+
 class KnowledgeHit(Strict):
     source_ref: str
     document_id: str
