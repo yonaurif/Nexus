@@ -6,7 +6,14 @@
 
 **Arquitectura:** backend Python (FastAPI más adelante) con contratos Pydantic `extra=forbid`; Core (Planner/Validator/Executor/Verifier) que **solo** alcanza herramientas a través del Gateway (Tool Registry con hash aprobado); memoria en PostgreSQL + pgvector; frontend React+TS que solo habla con el Backend API.
 
-**Stack actual:** Python 3.11 · pydantic 2.13 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git.
+**Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
+
+**Arranque local:**
+```bash
+docker compose up -d db                      # .env en la raíz con NEXUS_DB_PASSWORD (no se sube)
+cd backend && .venv/Scripts/alembic.exe upgrade head
+.venv/Scripts/python.exe -m pytest -q        # 21 passed (los de DB se saltan si Postgres no está)
+```
 
 ---
 
@@ -30,18 +37,31 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
                                                      │
                                                      v
   nexus/core/state.py  <── estado de tarea ──  [Orchestrator]           (pendiente: C2)
+        ^ transition()
+        │
+  nexus/core/task_store.py  create_task / set_status / get_status    ✅ HECHO (M0)
+        │ UPDATE tasks + INSERT execution_events (misma transacción)
+        v
+  PostgreSQL: tasks, execution_events (append-only por trigger)    ✅ HECHO (M0)
                                                      │ Plan (contracts.Plan)
                                                      v
   nexus/core/plan_validator.py  ── validate_plan(plan, registry) ──┐    ✅ HECHO
                                                                    │ registry.resolve(tool_id)
                                                                    v
-  nexus/gateway/registry.py  (ToolRegistry: register/approve/resolve) ✅ HECHO
-            │ ToolManifest.definition_hash (sha256)
+  nexus/gateway/registry.py                                          ✅ HECHO
+     ToolRegistry (memoria, tests unitarios) ─┐ misma interfaz,
+     SqlToolRegistry (tabla `tools`)  ────────┴─ misma regla _checked()
+            │ ToolManifest.definition_hash (sha256, recalculado al leer)
             v
   nexus/contracts.py  (Plan, PlanStep, ToolManifest, ToolResult, Evidence) ✅ HECHO
+
+  nexus/db.py  get_engine() ← NEXUS_DATABASE_URL | NEXUS_DB_PASSWORD | ../.env   ✅ HECHO
             │
+  migrations/versions/0001_m0_base.py (Alembic, reversible)          ✅ HECHO
             v
-  docker-compose.yml → PostgreSQL 16 + pgvector (127.0.0.1:5432)      ✅ definido, sin tablas aún
+  docker-compose.yml → PostgreSQL 16 + pgvector 127.0.0.1:5432
+     tablas: memory_sources, tasks, plans, plan_steps, tools,
+             tool_executions, execution_events, audit_events
 ```
 
 **Conexiones reales en código hoy:**
@@ -49,6 +69,10 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 2. `ToolRegistry` guarda el `definition_hash` en el momento de `approve()`. Si se re-registra una definición distinta, `resolve` falla hasta nueva aprobación. → Doc 05 §8.5.
 3. Todos los contratos heredan de `Strict` (`extra="forbid"`). → Doc 02 §14.
 4. `state.transition` es la única forma de cambiar estado; los terminales no tienen salida. → Doc 02 §7.1.
+5. `task_store.set_status` bloquea la fila (`FOR UPDATE`), llama a `transition()` **antes** de escribir y registra `task.status.changed` con el `correlation_id` de la tarea. Una transición inválida no deja rastro. → Doc 02 §15.
+6. `execution_events` y `audit_events` rechazan UPDATE/DELETE con un trigger en la DB (no solo en código). → Doc 03 §3.1.
+7. `validate_plan` funciona igual con `SqlToolRegistry`; el hash se recalcula desde el manifest guardado, no se confía en la columna. → Doc 05 §8.5.
+8. `tool_executions` guarda solo `arguments_hash`, nunca argumentos en claro; `memory_sources.auth_ref` es una referencia, nunca el secreto. → Doc 05 §18, Doc 03 §7.1.
 
 ## 3. Skills / herramientas usadas para iniciar
 
@@ -78,13 +102,17 @@ No aplicadas aún (cuándo entran): `frontend-design` + `design:*` → Fase 1 fr
 
 Verificar: `cd backend && python -m pytest -q` → `14 passed`.
 
-### ⬜ M0 — Persistencia (Doc 03 §17, Doc 02 §13)
+### ✅ M0 — Persistencia (HECHO) (Doc 03 §17, Doc 02 §13)
 
-- [ ] Crear `.env` con `NEXUS_DB_PASSWORD` y levantar `docker compose up -d db`
-- [ ] Añadir `sqlalchemy`, `alembic`, `psycopg[binary]` a `pyproject.toml`
-- [ ] Migración 0001: `CREATE EXTENSION vector`; tablas `tasks`, `plans`, `plan_steps`, `tool_executions`, `execution_events`, `audit_events`, `memory_sources` (todas con `owner_id`, timestamps)
-- [ ] Test de integración: insertar tarea, transicionar con `state.transition`, persistir evento con `correlation_id`
-- [ ] Mover `ToolRegistry` de memoria a tabla `tools` (`tool_id`, `manifest jsonb`, `approved_hash`, `status`)
+- [x] `.env` local con `NEXUS_DB_PASSWORD` aleatoria (ignorado por git); `docker compose up -d db`
+- [x] `sqlalchemy`, `alembic`, `psycopg[binary]` en `pyproject.toml`; venv con uv
+- [x] `backend/nexus/db.py` — URL desde entorno o `.env`
+- [x] `backend/migrations/versions/0001_m0_base.py` — `vector`, 8 tablas, índices, triggers append-only; `downgrade` probado
+- [x] `backend/nexus/core/task_store.py` — tareas persistidas + eventos
+- [x] `SqlToolRegistry` en `backend/nexus/gateway/registry.py` (tabla `tools`)
+- [x] `backend/tests/test_m0_db.py` — 7 tests de integración (extensión, tablas, ciclo de vida, transición inválida, append-only, registry, validator+registry)
+
+Pendiente de M0 que se difiere: `plans`/`plan_steps`/`tool_executions` tienen tabla pero aún no repositorio (entran con C2, cuando haya Executor que los escriba).
 
 ### ⬜ C1 — Core conversacional (Doc 02 §18, Doc 04 Fase 1)
 
@@ -123,7 +151,9 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | D1 | Orquestador Python propio y pequeño | Adoptada | Doc 02 §20 |
 | D2 | PostgreSQL 16 + pgvector como fuente de verdad, sin Neo4j | Adoptada | Doc 03 §2 |
 | D3 | Monorepo: `backend/` (Python) ahora, `frontend/` cuando llegue Fase 1 | Adoptada | Doc 04 §14 |
-| D4 | Registro de herramientas en memoria hasta M0 | Temporal | ponytail |
+| D4 | Registro de herramientas: `SqlToolRegistry` en producción, `ToolRegistry` en memoria para tests unitarios | Adoptada (M0) | Doc 05 §6 |
+| D9 | SQL explícito con `sa.text` (SQLAlchemy Core), sin ORM; migraciones Alembic en SQL plano | Adoptada | ponytail / Doc 03 §7 |
+| D10 | Append-only forzado por trigger en Postgres | Adoptada | Doc 03 §3.1 |
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
 | D6 | Modelo LLM/embeddings | **Pendiente** (falta CPU/GPU/VRAM) | Doc 02 §10, Doc 03 §8.1 |
 | D7 | SSE vs WebSocket | SSE inicial propuesto | Doc 04 §13 |
@@ -136,3 +166,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | Leídos los 7 documentos; creado este plan | — |
 | 2026-11-15 | C0+G0: contratos, estados, validador, registry; compose de Postgres | `pytest` 14 passed; `docker compose config` OK |
 | 2026-11-15 | Repo conectado a GitHub: `origin` → https://github.com/yonaurif/Nexus (rama `main`) | `git push -u origin main` |
+| 2026-11-15 | M0: Postgres+pgvector levantado, migración 0001, task_store, SqlToolRegistry | `pytest` 21 passed contra Postgres real; `alembic downgrade base` + `upgrade head` OK |
