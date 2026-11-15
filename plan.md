@@ -8,15 +8,17 @@
 
 **Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · FastAPI 0.163 · uvicorn 0.54 · httpx 0.28 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
 
-**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). Ollama **no instalado**.
+**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). Python global tiene `llama-cpp-python` 0.2.90 **solo CPU**; el venv del proyecto aún no. No hay `.gguf` descargados.
 
 **Arranque local:**
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 41 passed
+.venv/Scripts/python.exe -m pytest -q                              # 44 passed
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
-# Opcional, modelo local: NEXUS_OLLAMA_MODEL=<modelo> (y NEXUS_OLLAMA_URL si no es :11434)
+# Modelo (en .env o entorno; sin servicios externos):
+#   NEXUS_GGUF_PATH=C:/modelos/x.gguf   (+ pip install -e ".[gguf]"; opcional NEXUS_GGUF_CTX, NEXUS_GGUF_GPU_LAYERS)
+#   NEXUS_MODEL=paquete.modulo:Clase    (tu propia IA en Python; tiene prioridad)
 ```
 
 ---
@@ -51,7 +53,7 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
      classifier.classify → _context (últimos 10 mensajes + SYSTEM_PROMPT)
      → Plan(1 paso synthesis) → validate_plan → models.generate → verificar → messages
                   │                                  │
-                  │                   nexus/core/models.py  StubModel | OllamaModel ✅
+                  │                   nexus/core/models.py  StubModel | LlamaCppModel (GGUF) | tu clase ✅
                   v
   nexus/core/state.py  <── estado de tarea ──  [Orchestrator real]    (pendiente: C2)
         ^ transition()
@@ -142,14 +144,15 @@ Pendiente de M0 que se difiere: `plans`/`plan_steps`/`tool_executions` tienen ta
 - [x] `backend/migrations/versions/0002_conversations.py` — `conversations`, `messages`
 - [x] Contratos `ChatRequest`, `ChatAccepted`, `AssistantResponse`, `TaskView`, `CoreEvent`, `RequestClass`
 - [x] `backend/nexus/core/classifier.py` — reglas por palabras clave con abstención (se sustituye en T1)
-- [x] `backend/nexus/core/models.py` — Model Router: `StubModel` (por defecto) y `OllamaModel` (con `NEXUS_OLLAMA_MODEL`)
+- [x] `backend/nexus/core/models.py` — Model Router en proceso: `StubModel` (por defecto), `LlamaCppModel` (GGUF con `NEXUS_GGUF_PATH`, carga perezosa, lock por hilo) y modelo propio (`NEXUS_MODEL=modulo:Clase`). **Sin Ollama** por decisión del propietario.
+- [x] `backend/tests/test_models.py` — 3 tests (GGUF con Llama simulado, archivo ausente, prioridad de selección)
 - [x] `backend/nexus/core/pipeline.py` — classify → context → plan → validate → run → verify → responder
 - [x] `backend/nexus/api/app.py` — 4 endpoints, auth Bearer, SSE con reconexión
 - [x] `backend/tests/test_c1_api.py` — 20 tests; prueba manual con uvicorn + curl (health, 401, chat, 9 eventos SSE, tarea)
 
 Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real; presupuesto de contexto por tokens → cuando haya tokenizador del modelo elegido.
 
-**Siguiente paso de modelo (D6):** con 8 GB de VRAM caben modelos de 7–8B en Q4 (unos 5 GB). Instalar Ollama y probar un modelo multilingüe pequeño antes de fijarlo.
+**Siguiente paso de modelo (D6):** con 8 GB de VRAM caben GGUF de 7–8B en Q4_K_M (unos 5 GB) con todas las capas en GPU. Hace falta `llama-cpp-python` compilado con CUDA en el venv (la instalación global es solo CPU) y elegir un GGUF multilingüe. Alternativa: tu propia clase Python con el contrato de `models.py`.
 
 ### ⬜ C2 — Planner/Executor/Verifier (Doc 02 §6–8)
 
@@ -185,7 +188,8 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | D9 | SQL explícito con `sa.text` (SQLAlchemy Core), sin ORM; migraciones Alembic en SQL plano | Adoptada | ponytail / Doc 03 §7 |
 | D10 | Append-only forzado por trigger en Postgres | Adoptada | Doc 03 §3.1 |
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
-| D6 | Modelo LLM/embeddings | **Pendiente**: hardware ya conocido (RTX 3050 8 GB); falta instalar Ollama y comparar | Doc 02 §10, Doc 03 §8.1 |
+| D6 | Modelo LLM/embeddings | **Pendiente** qué GGUF; hardware conocido (RTX 3050 8 GB) | Doc 02 §10, Doc 03 §8.1 |
+| D13 | Runtime de modelos **en proceso**: GGUF vía llama-cpp-python o clase Python propia; **no Ollama** ni servidores externos | Adoptada (decisión del propietario) | Doc 02 §10 |
 | D7 | SSE para estados de tarea (servidor → cliente), con id de `execution_events` | Adoptada (C1) | Doc 04 §9.2 |
 | D11 | Auth inicial: un token Bearer por instancia (`NEXUS_API_TOKEN`), un único propietario | Temporal hasta Fase 4 | Doc 04 §11 |
 | D12 | Procesado en `BackgroundTasks` de FastAPI; cola durable (Redis Streams) cuando haya agentes | Temporal | Doc 05 §15 |
@@ -200,3 +204,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | Repo conectado a GitHub: `origin` → https://github.com/yonaurif/Nexus (rama `main`) | `git push -u origin main` |
 | 2026-11-15 | M0: Postgres+pgvector levantado, migración 0001, task_store, SqlToolRegistry | `pytest` 21 passed contra Postgres real; `alembic downgrade base` + `upgrade head` OK |
 | 2026-11-15 | C1: API FastAPI, pipeline conversacional, clasificador, Model Router, SSE, migración 0002 | `pytest` 41 passed; uvicorn + curl de punta a punta |
+| 2026-11-15 | Model Router: Ollama sustituido por GGUF en proceso (llama-cpp-python, extra `[gguf]`) + modelo Python propio | `pytest` 44 passed |

@@ -1,8 +1,20 @@
-"""Model Router (Doc 02 §10): interfaz única; el Core no depende de un proveedor concreto.
+"""Model Router (Doc 02 §10): interfaz única, todo en proceso, sin servicios externos.
 
-Modelo = objeto con `name`, `generate(messages) -> str` y `health() -> "ok" | "unavailable" | ...`.
+Contrato de un modelo (sirve para tu propia IA en Python):
+    name: str
+    generate(messages: list[{"role": "system"|"user"|"assistant", "content": str}]) -> str
+    health() -> "ok" | otro estado legible
+    configured: bool = True   (opcional; False => el pipeline marca la tarea como parcial)
+
+Selección (por orden):
+    NEXUS_MODEL="paquete.modulo:Clase"  -> tu clase, instanciada sin argumentos
+    NEXUS_GGUF_PATH="C:/modelos/x.gguf" -> llama-cpp-python (pip install -e ".[gguf]")
+    nada                                -> StubModel
 """
-import httpx
+import importlib
+import importlib.util
+import threading
+from pathlib import Path
 
 from nexus.config import env
 
@@ -19,34 +31,55 @@ class StubModel:
     configured = False  # el pipeline lo marca como resultado parcial, nunca como éxito
 
     def generate(self, messages: list[dict]) -> str:
-        return ("Todavía no tengo un modelo de lenguaje configurado. "
-                "Define NEXUS_OLLAMA_MODEL para activar uno local.")
+        return ("Todavía no tengo un modelo de lenguaje configurado. Define NEXUS_GGUF_PATH "
+                "(modelo GGUF local) o NEXUS_MODEL (tu propia clase Python).")
 
     def health(self) -> str:
         return "stub"
 
 
-class OllamaModel:
-    def __init__(self, model: str, base_url: str, timeout_s: float = 120):
-        self.name, self.base_url, self.timeout_s = f"ollama:{model}", base_url.rstrip("/"), timeout_s
-        self._model = model
+class LlamaCppModel:
+    """Modelo GGUF cargado en el propio proceso con llama-cpp-python."""
+
+    def __init__(self, path: str, n_ctx: int = 4096, n_gpu_layers: int = -1,
+                 max_tokens: int = 512, llama_cls=None):
+        self.path, self.n_ctx, self.n_gpu_layers, self.max_tokens = Path(path), n_ctx, n_gpu_layers, max_tokens
+        self.name = f"gguf:{self.path.name}"
+        self._llama_cls, self._llama = llama_cls, None
+        self._lock = threading.Lock()  # llama.cpp no es thread-safe; BackgroundTasks usa un pool
+
+    def _load(self):
+        if self._llama is None:
+            cls = self._llama_cls
+            if cls is None:
+                from llama_cpp import Llama  # import perezoso: dependencia opcional [gguf]
+                cls = Llama
+            self._llama = cls(model_path=str(self.path), n_ctx=self.n_ctx,
+                              n_gpu_layers=self.n_gpu_layers, verbose=False)
+        return self._llama
 
     def generate(self, messages: list[dict]) -> str:
-        r = httpx.post(f"{self.base_url}/api/chat", timeout=self.timeout_s,
-                       json={"model": self._model, "messages": messages, "stream": False})
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+        with self._lock:
+            out = self._load().create_chat_completion(messages=messages, max_tokens=self.max_tokens)
+        return out["choices"][0]["message"]["content"].strip()
 
     def health(self) -> str:
-        try:
-            tags = httpx.get(f"{self.base_url}/api/tags", timeout=2).json()
-        except (httpx.HTTPError, ValueError):
-            return "unavailable"
-        names = {m["name"] for m in tags.get("models", [])}
-        return "ok" if self._model in names or f"{self._model}:latest" in names else "model_missing"
+        if not self.path.is_file():
+            return "model_missing"
+        if self._llama_cls is None and importlib.util.find_spec("llama_cpp") is None:
+            return "runtime_missing"
+        return "ok"
+
+
+def _load_custom(spec: str):
+    module, _, cls = spec.partition(":")
+    return getattr(importlib.import_module(module), cls)()
 
 
 def get_model():
-    if model := env("NEXUS_OLLAMA_MODEL"):
-        return OllamaModel(model, env("NEXUS_OLLAMA_URL", "http://127.0.0.1:11434"))
+    if spec := env("NEXUS_MODEL"):
+        return _load_custom(spec)
+    if path := env("NEXUS_GGUF_PATH"):
+        return LlamaCppModel(path, n_ctx=int(env("NEXUS_GGUF_CTX", "4096")),
+                             n_gpu_layers=int(env("NEXUS_GGUF_GPU_LAYERS", "-1")))
     return StubModel()
