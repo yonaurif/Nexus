@@ -43,12 +43,13 @@ export type TaskStatus =
   | "queued" | "running" | "verifying" | "completed" | "needs_input" | "partial" | "failed"
   | "cancel_requested" | "cancelled" | "expired";
 export type Task = {
-  task_id: string; status: TaskStatus; correlation_id: string;
+  task_id: string; status: TaskStatus; correlation_id: string; request_class?: string | null;
   response: { text: string; task_status: string; warnings: string[]; sources: Source[] } | null;
 };
 export type Message = {
   id: number; role: "user" | "assistant"; content: string; task_id: string | null;
   task_status: TaskStatus | null; warnings: string[]; sources: Source[]; created_at: string;
+  request_class?: string | null;
 };
 export type Conversation = { conversation_id: string; title: string; messages: number; last_at: string | null };
 export type Approval = {
@@ -78,6 +79,17 @@ export type Folder = {
               n_removed: number; started_at: string } | null;
 };
 
+export type Feedback = {
+  feedback_id: string; task_id: string; text: string; predicted_label: string | null; corrected_label: string;
+  status: string; created_at: string;
+};
+export type ModelEntry = {
+  id: string; version: string; status: "candidate" | "active" | "retired"; created_at: string; threshold: number;
+  metrics: { dataset: { examples: number; feedback_examples?: number };
+             test: { macro_f1: number; hybrid_macro_f1?: number; baseline_rules_macro_f1: number; coverage: number };
+             cross_validation?: { macro_f1_mean: number; macro_f1_std: number } };
+};
+
 export const api = {
   health: () => call<Health>("/system/health"),
   conversations: () => call<{ conversations: Conversation[] }>("/chat/conversations"),
@@ -103,6 +115,14 @@ export const api = {
   addFolder: (path: string, interval_minutes: number | null) =>
     call<{ source_id: string }>("/knowledge/sources", { method: "POST", body: JSON.stringify({ path, interval_minutes }) }),
   syncFolder: (id: string) => call(`/knowledge/sources/${id}/sync`, { method: "POST" }),
+  feedback: (taskId: string, correct_label: string) =>
+    call<{ feedback_id: string }>(`/tasks/${taskId}/feedback`, { method: "POST", body: JSON.stringify({ correct_label }) }),
+  feedbackList: (status = "pending") => call<{ feedback: Feedback[] }>(`/learning/feedback?status=${status}`),
+  reviewFeedback: (id: string, decision: "approve" | "reject") =>
+    call(`/learning/feedback/${id}/review`, { method: "POST", body: JSON.stringify({ decision }) }),
+  models: () => call<{ models: ModelEntry[]; active_intent: boolean }>("/learning/models"),
+  train: () => call("/learning/train", { method: "POST" }),
+  promote: (id: string) => call(`/learning/models/${id}/promote`, { method: "POST" }),
 };
 
 export const FINAL: TaskStatus[] = ["completed", "partial", "failed", "cancelled", "expired", "needs_input",

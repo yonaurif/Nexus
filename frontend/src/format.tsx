@@ -65,6 +65,12 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   failed: "fallida", cancel_requested: "cancelando", cancelled: "cancelada", expired: "caducada",
 };
 
+export const INTENT_LABEL: Record<string, string> = {
+  conversation: "conversación", knowledge_query: "consulta a documentos", task_request: "tarea",
+  agent_request: "servicio externo", memory_update: "recordar preferencia", feedback: "valoración",
+  rule_proposal: "proponer regla", system_admin: "administración", unknown: "no entendida",
+};
+
 export function sourceLabel(ref: string): string {
   if (ref.startsWith("doc:")) return `documento ${ref.slice(4, 16)}…${ref.split("#")[1] ? ` §${ref.split("#")[1]}` : ""}`;
   if (ref.startsWith("internal:")) return ref.slice(9).replace(/_/g, " ");

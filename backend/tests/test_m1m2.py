@@ -23,7 +23,7 @@ class HashEmbedder:
     """Embedder determinista para tests (bolsa de palabras con hashing, normalizado)."""
     provider, model_name, model_version = "test", "hash-bow", "1"
 
-    def __init__(self, dimensions=64):
+    def __init__(self, dimensions=512):  # 512: con 64 las colisiones de hash creaban parecidos falsos
         self.dimensions = dimensions
 
     def embed(self, texts):
@@ -91,10 +91,12 @@ def test_ingest_dedupes_and_registers_profile(engine, emb):
     b = store.ingest_document(engine, o, title="Atlas copia", text=DOC, embedder=emb)
     assert b.document_id == a.document_id and b.deduplicated and a.chunks >= 3
     with engine.connect() as c:
-        dims = c.scalar(sa.text("SELECT dimensions FROM embedding_profiles WHERE model_name='hash-bow'"))
+        dims = c.scalar(sa.text(
+            "SELECT DISTINCT p.dimensions FROM chunk_embeddings e JOIN embedding_profiles p ON p.id=e.profile_id "
+            "JOIN document_chunks d ON d.id=e.chunk_id WHERE d.document_id=:d"), {"d": a.document_id})
         n = c.scalar(sa.text("SELECT count(*) FROM chunk_embeddings e JOIN document_chunks d ON d.id=e.chunk_id "
                              "WHERE d.document_id=:d"), {"d": a.document_id})
-    assert dims == 64 and n == a.chunks
+    assert dims == 512 and n == a.chunks
 
 
 def test_secrets_are_not_stored(engine, emb):

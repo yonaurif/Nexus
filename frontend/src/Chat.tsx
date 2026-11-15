@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, FINAL, followTask, type Approval, type Message, type Source, type TaskStatus } from "./api";
-import { RichText, sourceLabel, STATUS_LABEL, warningLabel } from "./format";
+import { INTENT_LABEL, RichText, sourceLabel, STATUS_LABEL, warningLabel } from "./format";
 
 // Etapas reales del Doc 02 §7.1 que se encienden por SSE. queued+running se muestran juntas.
 const STAGES: { key: string; label: string; states: TaskStatus[] }[] = [
@@ -72,6 +72,30 @@ function Sources({ sources }: { sources: Source[] }) {
   );
 }
 
+/** T5: lo que entendió el clasificador y cómo corregirlo (la corrección va a revisión, no al modelo). */
+function IntentTag({ taskId, label }: { taskId: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
+  async function correct(to: string) {
+    try { await api.feedback(taskId, to); setSent(`corregido a «${INTENT_LABEL[to]}» · pendiente de tu revisión`); }
+    catch (e) { setSent(e instanceof ApiError ? e.code : "error"); }
+    setOpen(false);
+  }
+  if (sent) return <span className="chip intent">{sent}</span>;
+  return (
+    <span className="intent-wrap">
+      <span className="chip intent" title="Clase que decidió el clasificador">entendí: {INTENT_LABEL[label] ?? label}</span>
+      {!open ? <button className="link small" onClick={() => setOpen(true)}>corregir</button> : (
+        <select aria-label="Clase correcta" defaultValue="" onChange={(e) => e.target.value && correct(e.target.value)}>
+          <option value="" disabled>¿qué era?</option>
+          {Object.entries(INTENT_LABEL).filter(([k]) => k !== label && k !== "unknown").map(([k, v]) =>
+            <option key={k} value={k}>{v}</option>)}
+        </select>
+      )}
+    </span>
+  );
+}
+
 function Bubble({ t, onDecide, onCancel }: { t: Turn; onDecide: (id: string, d: "approve" | "reject") => void;
                                            onCancel: (taskId: string) => void }) {
   if (t.role === "user") return <article className="turn user"><RichText text={t.content} /></article>;
@@ -84,6 +108,7 @@ function Bubble({ t, onDecide, onCancel }: { t: Turn; onDecide: (id: string, d: 
         : <p className="thinking" role="status">NEXUS está trabajando…</p>}
       {t.approvals?.map((a) => <ApprovalCard key={a.approval_id} a={a} onDecide={onDecide} />)}
       <footer>
+        {t.request_class && t.task_id && !working && <IntentTag taskId={t.task_id} label={t.request_class} />}
         {t.warnings.map((w) => <span key={w} className="chip warn" title={w}>{warningLabel(w)}</span>)}
         <Sources sources={t.sources} />
         {working && t.task_id && <button className="link" onClick={() => onCancel(t.task_id!)}>cancelar</button>}
@@ -128,6 +153,7 @@ export function Chat({ conversationId, onConversation }: { conversationId: strin
       const approvals = task.status === "awaiting_approval"
         ? (await api.approvals()).approvals.filter((a) => a.task_id === taskId) : [];
       patch(taskId, (t) => ({ ...t, task_status: task.status, content: task.response?.text ?? "",
+                              request_class: task.request_class ?? null,
                               warnings: task.response?.warnings ?? [], sources: task.response?.sources ?? [], approvals }));
     } catch (e) {
       setError(e instanceof ApiError ? e.code : "Sin conexión con NEXUS");

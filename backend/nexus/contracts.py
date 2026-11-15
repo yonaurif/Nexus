@@ -92,6 +92,7 @@ class TaskView(Strict):
     task_id: str
     status: str
     correlation_id: str
+    request_class: str | None = None
     response: AssistantResponse | None = None
 
 
@@ -111,6 +112,11 @@ class DocumentIngested(Strict):
 
 class ApprovalDecision(Strict):
     decision: Literal["approve", "reject"]
+
+
+class FeedbackIn(Strict):
+    correct_label: Literal["conversation", "knowledge_query", "task_request", "agent_request", "memory_update",
+                           "feedback", "rule_proposal", "system_admin"]
 
 
 class FolderSourceIn(Strict):

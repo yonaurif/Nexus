@@ -203,3 +203,12 @@ code { font: 0.86em var(--mono); background: var(--bg-3); padding: 0.05em 0.35em
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* --- T5: intención y aprendizaje --- */
+.intent-wrap { display: inline-flex; align-items: center; gap: 0.4rem; }
+.chip.intent { color: var(--ink-3); border-style: dashed; }
+button.link.small { font-size: 0.72rem; }
+.intent-wrap select { background: var(--bg); border: 1px solid var(--amber-dim); color: var(--ink); font: 0.72rem var(--mono); padding: 0.2rem; border-radius: 2px; }
+.tabs button { font-size: 0.62rem; }
+.rail { overflow-x: hidden; }
+.tabs button[role="tab"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.02em; }

@@ -152,6 +152,8 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
     try:
         _step(engine, task_id, S.classifying)
         label = classify(message)
+        with engine.begin() as c:  # T5: para poder corregirla después
+            c.execute(sa.text("UPDATE tasks SET request_class=:l WHERE id=:t"), {"l": label, "t": task_id})
         if label == "unknown":
             _step(engine, task_id, S.needs_input)
             _reply(engine, task_id, conversation_id,

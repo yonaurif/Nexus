@@ -8,6 +8,7 @@ import uuid
 import sqlalchemy as sa
 
 log = logging.getLogger("nexus.learning")
+MAX_REGRESSION = 0.02  # ponytail: tolerancia fija con un test de 36 ejemplos; ajustar al crecer el test
 
 
 class RegistryError(Exception):
@@ -47,8 +48,16 @@ def promote(conn, model_id: str) -> None:
     if m is None:
         raise RegistryError("MODEL_NOT_FOUND")
     test = m["metrics"]["test"]
-    if test.get("hybrid_macro_f1", test["macro_f1"]) <= test["baseline_rules_macro_f1"]:
+    score = test.get("hybrid_macro_f1", test["macro_f1"])
+    if score <= test["baseline_rules_macro_f1"]:
         raise RegistryError("NOT_BETTER_THAN_BASELINE")
+    # TL §7: no empeorar de forma material respecto al modelo que ya está en producción.
+    active = conn.execute(sa.text("SELECT metrics FROM model_registry WHERE task=:t AND status='active' AND id<>:i"),
+                          {"t": m["task"], "i": model_id}).first()
+    if active is not None:
+        a = active.metrics["test"]
+        if score < a.get("hybrid_macro_f1", a["macro_f1"]) - MAX_REGRESSION:
+            raise RegistryError("REGRESSION")
     conn.execute(sa.text("UPDATE model_registry SET status='retired' WHERE task=:t AND status='active'"),
                  {"t": m["task"]})
     conn.execute(sa.text("UPDATE model_registry SET status='active', promoted_at=now() WHERE id=:i"), {"i": model_id})

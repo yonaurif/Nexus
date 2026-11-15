@@ -242,3 +242,4 @@ def test_system_prompt_lists_only_real_capabilities(api):
     ask(api(model), "hola, ¿qué puedes hacer?")
     system = model.calls[-1][0]["content"]
     assert "system.time.now" in system and "No afirmes tener otras capacidades" in system
+    assert "No inventes datos sobre los proyectos" in system

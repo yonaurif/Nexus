@@ -52,6 +52,7 @@ class Dataset:
     def manifest(self) -> dict:
         body = "\n".join(f"{e.example_id}\t{e.label}\t{normalize(e.text)}" for e in self.examples)
         return {"version": "sha256:" + hashlib.sha256(body.encode()).hexdigest(), "examples": len(self.examples),
+                "feedback_examples": sum(e.source_type == "owner_feedback" for e in self.examples),
                 "label_counts": dict(sorted(Counter(e.label for e in self.examples).items())),
                 "rejected": len(self.rejected)}
 
@@ -84,6 +85,24 @@ def load(path: str | Path) -> Dataset:
     return Dataset(accepted, rejected)
 
 
+def from_feedback(conn) -> list[Example]:
+    """Correcciones APROBADAS por el propietario como ejemplos (TL §8 pasos 1–4)."""
+    import sqlalchemy as sa
+    rows = conn.execute(sa.text("SELECT id, text, corrected_label FROM feedback_events "
+                                "WHERE status='approved' AND kind='intent_correction' ORDER BY created_at")).all()
+    return [Example(example_id=r.id, task="intent_es_v1", text=normalize(r.text), label=r.corrected_label,
+                    language="es", source_type="owner_feedback", source_ref=f"feedback:{r.id}",
+                    license_or_permission="owner-provided", review_status="approved", schema_version=1)
+            for r in rows]
+
+
+def merge(base: Dataset, extra: list[Example]) -> Dataset:
+    """Corpus base + feedback, deduplicado por texto normalizado (gana el feedback: es del propietario)."""
+    feedback_texts = {e.text.lower() for e in extra}
+    kept = [e for e in base.examples if e.text.lower() not in feedback_texts]
+    return Dataset(kept + extra, base.rejected)
+
+
 def split(examples: list[Example]) -> dict[str, list[Example]]:
     """Estratificado por clase, determinista (semilla fija). Sin solapes entre particiones.
     ponytail: sin agrupar por conversación (los ejemplos semilla son independientes); agrupar por
@@ -92,6 +111,10 @@ def split(examples: list[Example]) -> dict[str, list[Example]]:
     for e in sorted(examples, key=lambda x: x.example_id):
         by_label[e.label].append(e)
     out: dict[str, list[Example]] = {"train": [], "validation": [], "test": []}
+    # T5: las correcciones del propietario van SIEMPRE a train. Validación y test quedan fijos (los del
+    # corpus base) para que dos versiones del modelo se puedan comparar (TL §6.3 "test bloqueado").
+    out["train"] += [e for e in examples if e.source_type == "owner_feedback"]
+    by_label = {k: [e for e in v if e.source_type != "owner_feedback"] for k, v in by_label.items()}
     rng = random.Random(SPLIT_SEED)
     for label in sorted(by_label):
         items = by_label[label][:]

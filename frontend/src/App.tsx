@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, auth, type Conversation } from "./api";
 import { Chat } from "./Chat";
-import { ConnectorsPanel, KnowledgePanel, SystemPanel } from "./Panels";
+import { ConnectorsPanel, KnowledgePanel, LearningPanel, SystemPanel } from "./Panels";
 
-type Tab = "sistema" | "conocimiento" | "conectores";
+type Tab = "sistema" | "conocimiento" | "conectores" | "aprendizaje";
 
 function Login({ onReady }: { onReady: () => void }) {
   const [token, setToken] = useState("");
@@ -73,14 +73,15 @@ export default function App() {
 
       <aside className="rail" aria-label="Panel de control">
         <div className="tabs" role="tablist">
-          {(["sistema", "conocimiento", "conectores"] as Tab[]).map((t) => (
+          {(["sistema", "conocimiento", "conectores", "aprendizaje"] as Tab[]).map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>{t}</button>
           ))}
           <button className="rail-toggle" aria-label={railOpen ? "Ocultar panel" : "Mostrar panel"} onClick={() => setRailOpen(!railOpen)}>
             {railOpen ? "›" : "‹"}
           </button>
         </div>
-        {railOpen && (tab === "sistema" ? <SystemPanel /> : tab === "conocimiento" ? <KnowledgePanel /> : <ConnectorsPanel />)}
+        {railOpen && (tab === "sistema" ? <SystemPanel /> : tab === "conocimiento" ? <KnowledgePanel />
+          : tab === "conectores" ? <ConnectorsPanel /> : <LearningPanel />)}
       </aside>
     </div>
   );

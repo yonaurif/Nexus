@@ -1,6 +1,6 @@
 """Entrenamiento offline del clasificador de intención (Text Learning §5 pasos 9–14, §8).
 
-    python -m nexus.learning.train_intent [data/intent/intent_es_v1.jsonl] [--promote]
+    python -m nexus.learning.train_intent [data/intent/intent_es_v1.jsonl] [--promote] [--no-feedback]
 
 Valida el dataset, entrena, evalúa en el test bloqueado contra la línea base de reglas, guarda el
 artefacto + informe en NEXUS_MODELS_DIR (por defecto backend/artifacts, fuera de git) y lo registra
@@ -9,24 +9,19 @@ como CANDIDATO. Solo con --promote (decisión del propietario) pasa a activo, y 
 import sys
 from pathlib import Path
 
-from nexus.config import env
 from nexus.db import get_engine
-from nexus.learning import dataset, intent, registry
-
-BACKEND = Path(__file__).resolve().parents[2]
+from nexus.learning import registry, service
 
 
 def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
-    path = Path(args[0]) if args else BACKEND / "data" / "intent" / "intent_es_v1.jsonl"
-    ds = dataset.load(path)
-    m = ds.manifest()
-    print(f"dataset {path.name}: {m['examples']} ejemplos, {m['rejected']} rechazados, versión {m['version'][:19]}…")
-    for r in ds.rejected[:10]:
-        print(f"  rechazado {r['example_id']}: {r['reason']}")
-
-    result = intent.train(ds, env("NEXUS_MODELS_DIR") or BACKEND / "artifacts")
+    path = Path(args[0]) if args else service.SEED_PATH
+    engine = get_engine()
+    model_id, result = service.train_and_register(engine, path, include_feedback="--no-feedback" not in argv)
     rep, t = result.report, result.report["test"]
+    m = rep["dataset"]
+    print(f"dataset {path.name} + feedback: {m['examples']} ejemplos ({m['feedback_examples']} de tus correcciones), "
+          f"{m['rejected']} rechazados, versión {m['version'][:19]}…")
     print(f"particiones {rep['splits']} · umbral de abstención {rep['threshold']}")
     cv = rep["cross_validation"]
     print(f"TEST  híbrido macro-F1 {t['hybrid_macro_f1']:.3f} · solo modelo {t['macro_f1']:.3f} · "
@@ -36,9 +31,6 @@ def main(argv: list[str]) -> int:
     for label, c in t["per_class"].items():
         print(f"  {label:16} P {c['precision']:.2f}  R {c['recall']:.2f}  F1 {c['f1']:.2f}  n={c['support']}")
 
-    engine = get_engine()
-    with engine.begin() as c:
-        model_id = registry.register(c, "intent_es", result)
     print(f"registrado como candidato: {model_id}\nartefacto: {result.artifact_path}")
     if "--promote" in argv:
         with engine.begin() as c:

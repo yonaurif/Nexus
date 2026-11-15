@@ -16,7 +16,7 @@ from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTP
 from fastapi.responses import FileResponse, StreamingResponse
 
 from nexus.config import env
-from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
+from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, FeedbackIn, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
 from nexus.core import approvals, classifier, hardware, pipeline, task_store
@@ -26,6 +26,8 @@ from nexus.gateway.registry import SqlToolRegistry
 from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
 from nexus.learning import registry
+from nexus.learning import service as learning_service
+from nexus.knowledge.sanitize import redact
 from nexus.memory import episodes
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
@@ -88,7 +90,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         return OWNER
 
     def owned_task(conn, task_id: str, owner: str):
-        row = conn.execute(sa.text("SELECT id, status, correlation_id FROM tasks "
+        row = conn.execute(sa.text("SELECT id, status, correlation_id, request_class FROM tasks "
                                    "WHERE id=:i AND owner_id=:o"), {"i": task_id, "o": owner}).first()
         if row is None:
             raise HTTPException(404, "TASK_NOT_FOUND")
@@ -124,7 +126,8 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         resp = msg and AssistantResponse(text=msg.content, task_status=t.status,
                                          warnings=msg.metadata.get("warnings", []),
                                          sources=msg.metadata.get("sources", []))
-        return TaskView(task_id=t.id, status=t.status, correlation_id=t.correlation_id, response=resp)
+        return TaskView(task_id=t.id, status=t.status, correlation_id=t.correlation_id, response=resp,
+                        request_class=t.request_class)
 
     @app.post("/api/v1/tasks/{task_id}/cancel")
     def cancel_task(task_id: str, owner: str = Depends(auth)):
@@ -341,6 +344,61 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         loaded = registry.activate_intent(engine)
         return {"model_id": model_id, "status": "active", "loaded": loaded}
 
+    # --- T5: correcciones del propietario -> revisión -> reentrenamiento (Text Learning §8) ---
+    @app.post("/api/v1/tasks/{task_id}/feedback", status_code=201)
+    def task_feedback(task_id: str, body: FeedbackIn, owner: str = Depends(auth)):
+        with engine.begin() as c:
+            t = owned_task(c, task_id, owner)
+            if t.request_class == body.correct_label:
+                raise HTTPException(422, "SAME_LABEL")
+            text = c.scalar(sa.text("SELECT content FROM messages WHERE task_id=:t AND role='user'"), {"t": task_id})
+            if redact(text or "")[1]:  # TL §5.5: un secreto nunca entra en un dataset
+                raise HTTPException(422, "SECRET_DETECTED")
+            if c.scalar(sa.text("SELECT 1 FROM feedback_events WHERE task_id=:t"), {"t": task_id}):
+                raise HTTPException(409, "FEEDBACK_EXISTS")
+            fid = f"fb_{uuid.uuid4().hex}"
+            c.execute(sa.text("INSERT INTO feedback_events (id, owner_id, task_id, text, predicted_label, "
+                              "corrected_label) VALUES (:i, :o, :t, :x, :p, :c)"),
+                      {"i": fid, "o": owner, "t": task_id, "x": text, "p": t.request_class, "c": body.correct_label})
+        return {"feedback_id": fid, "status": "pending"}
+
+    @app.get("/api/v1/learning/feedback")
+    def list_feedback(status: str | None = Query(None, pattern="^(pending|approved|rejected)$"),
+                      owner: str = Depends(auth)):
+        with engine.connect() as c:
+            rows = c.execute(sa.text(
+                "SELECT id, task_id, text, predicted_label, corrected_label, status, created_at, reviewed_at "
+                "FROM feedback_events WHERE owner_id=:o AND (CAST(:s AS text) IS NULL OR status=:s) "
+                "ORDER BY created_at DESC LIMIT 200"), {"o": owner, "s": status}).all()
+        return {"feedback": [{"feedback_id": r.id, **{k: v for k, v in r._asdict().items() if k != "id"}}
+                             for r in rows]}
+
+    @app.post("/api/v1/learning/feedback/{feedback_id}/review")
+    def review_feedback(feedback_id: str, body: ApprovalDecision, owner: str = Depends(auth)):
+        """El propietario confirma que la corrección pasa a ser una etiqueta permanente (TL §8 paso 2)."""
+        with engine.begin() as c:
+            status = c.scalar(sa.text("SELECT status FROM feedback_events WHERE id=:i AND owner_id=:o FOR UPDATE"),
+                              {"i": feedback_id, "o": owner})
+            if status is None:
+                raise HTTPException(404, "FEEDBACK_NOT_FOUND")
+            if status != "pending":
+                raise HTTPException(409, "FEEDBACK_ALREADY_REVIEWED")
+            new = "approved" if body.decision == "approve" else "rejected"
+            c.execute(sa.text("UPDATE feedback_events SET status=:s, reviewed_at=now(), reviewed_by=:o WHERE id=:i"),
+                      {"s": new, "o": owner, "i": feedback_id})
+        return {"feedback_id": feedback_id, "status": new}
+
+    @app.post("/api/v1/learning/train", status_code=202)
+    def retrain(bg: BackgroundTasks, owner: str = Depends(auth)):
+        """Entrena offline en segundo plano y registra un CANDIDATO (nunca lo promueve)."""
+        def job():
+            try:
+                learning_service.train_and_register(engine)
+            except learning_service.Busy:
+                logging.getLogger("nexus.learning").info("entrenamiento ya en curso")
+        bg.add_task(job)
+        return {"status": "training"}
+
     # --- Conversaciones (Doc 04 §9.1) ---
     @app.get("/api/v1/chat/conversations")
     def list_conversations(owner: str = Depends(auth)):
@@ -360,12 +418,14 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                             {"i": conversation_id, "o": owner}):
                 raise HTTPException(404, "CONVERSATION_NOT_FOUND")
             rows = c.execute(sa.text(
-                "SELECT m.id, m.role, m.content, m.task_id, m.metadata, m.created_at, t.status AS task_status "
+                "SELECT m.id, m.role, m.content, m.task_id, m.metadata, m.created_at, t.status AS task_status, "
+                "t.request_class "
                 "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id WHERE m.conversation_id=:i ORDER BY m.id"),
                 {"i": conversation_id}).all()
         return {"conversation_id": conversation_id, "messages": [
             {"id": r.id, "role": r.role, "content": r.content, "task_id": r.task_id, "task_status": r.task_status,
              "warnings": (r.metadata or {}).get("warnings", []), "sources": (r.metadata or {}).get("sources", []),
+             "request_class": r.request_class,
              "created_at": r.created_at} for r in rows]}
 
     _serve_frontend(app)

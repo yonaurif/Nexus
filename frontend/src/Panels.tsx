@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type Folder, type Health, type Tool } from "./api";
+import { api, ApiError, type Feedback, type Folder, type Health, type ModelEntry, type Tool } from "./api";
+import { INTENT_LABEL } from "./format";
 
 function useLoad<T>(load: () => Promise<T>, everyMs = 0) {
   const [data, setData] = useState<T | null>(null);
@@ -153,6 +154,64 @@ export function KnowledgePanel() {
             {f.status === "active" && (
               <button className="ghost" onClick={async () => { await api.syncFolder(f.source_id); setTimeout(reload, 1500); }}>Sincronizar</button>
             )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const loadFeedback = () => api.feedbackList("pending");
+const loadModels = () => api.models();
+
+/** Learning Center mínimo (Doc 04 §10, TL §8): revisar correcciones, reentrenar, comparar y promover. */
+export function LearningPanel() {
+  const fb = useLoad(loadFeedback);
+  const models = useLoad(loadModels, 8000);
+  const [note, setNote] = useState<string | null>(null);
+
+  const review = async (f: Feedback, d: "approve" | "reject") => { await api.reviewFeedback(f.feedback_id, d); fb.reload(); };
+  async function train() {
+    setNote("entrenando… (aparecerá como candidato)");
+    try { await api.train(); setTimeout(models.reload, 3000); } catch (e) { setNote(e instanceof ApiError ? e.code : "error"); }
+  }
+  async function promote(m: ModelEntry) {
+    try { await api.promote(m.id); setNote(`${m.version} activo`); models.reload(); }
+    catch (e) { setNote(e instanceof ApiError ? `no promovido: ${e.code}` : "error"); }
+  }
+  const f1 = (x?: number) => (x === undefined ? "—" : x.toFixed(3));
+
+  return (
+    <div className="panel">
+      <p className="muted">Tus correcciones no cambian el modelo: las revisas, se reentrena aparte y solo promueves si mejora.</p>
+      <h3>correcciones pendientes</h3>
+      {fb.error && <p className="error">{fb.error}</p>}
+      {!fb.data?.feedback.length && <p className="muted">ninguna</p>}
+      <ul className="tools">
+        {fb.data?.feedback.map((f) => (
+          <li key={f.feedback_id} className="tool">
+            <p>«{f.text}»</p>
+            <div><span className="chip">{INTENT_LABEL[f.predicted_label ?? ""] ?? "—"}</span>→<span className="chip st-enabled">{INTENT_LABEL[f.corrected_label]}</span></div>
+            <div className="row">
+              <button onClick={() => review(f, "approve")}>Usar para entrenar</button>
+              <button className="ghost" onClick={() => review(f, "reject")}>Descartar</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <h3>modelos de intención</h3>
+      <button className="ghost" onClick={train}>Reentrenar con mis correcciones</button>
+      {note && <p className="note" role="status">{note}</p>}
+      <ul className="tools">
+        {models.data?.models.filter((m) => m.status !== "retired").map((m) => (
+          <li key={m.id} className={`tool tool-${m.status === "active" ? "enabled" : "review"}`}>
+            <div><strong>{m.version}</strong><span className={`chip ${m.status === "active" ? "st-enabled" : "st-review"}`}>{m.status}</span></div>
+            <dl className="kv">
+              <dt>híbrido</dt><dd>{f1(m.metrics.test.hybrid_macro_f1)} F1 · reglas {f1(m.metrics.test.baseline_rules_macro_f1)}</dd>
+              <dt>validación</dt><dd>{m.metrics.cross_validation ? `${f1(m.metrics.cross_validation.macro_f1_mean)} ± ${f1(m.metrics.cross_validation.macro_f1_std)}` : "—"}</dd>
+              <dt>datos</dt><dd>{m.metrics.dataset.examples} ejemplos · {m.metrics.dataset.feedback_examples ?? 0} tuyos</dd>
+            </dl>
+            {m.status === "candidate" && <div className="row"><button onClick={() => promote(m)}>Promover</button></div>}
           </li>
         ))}
       </ul>
