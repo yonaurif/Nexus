@@ -14,10 +14,11 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 60 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 77 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=C:/Worker Primitivo/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf   (activo; NEXUS_GGUF_CTX=4096, NEXUS_GGUF_GPU_LAYERS=-1)
+#   NEXUS_EMBED_MODEL_DIR=<snapshot HF de paraphrase-multilingual-MiniLM-L12-v2>  (activo; ONNX, pip install -e ".[embeddings]")
 #   reinstalar con CUDA: CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
 #   NEXUS_MODEL=paquete.modulo:Clase    (tu propia IA en Python; tiene prioridad)
 ```
@@ -90,7 +91,13 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
   docker-compose.yml → PostgreSQL 16 + pgvector 127.0.0.1:5432
      tablas: memory_sources, tasks, plans, plan_steps, tools,
              tool_executions, execution_events, audit_events,
-             conversations, messages (0002)
+             conversations, messages (0002),
+             memory_episodes, documents, document_chunks (tsv), embedding_profiles, chunk_embeddings (0003)
+
+  nexus/knowledge/  sanitize.redact → chunking.chunk_text → store.ingest_document / store.search   ✅ (M2)
+     embeddings.OnnxEmbedder (MiniLM multilingüe, 384 d, CPU, sin torch)
+  nexus/memory/episodes.py  record / search (append-only)                                      ✅ (M1)
+     API: POST /api/v1/knowledge/documents · GET /api/v1/knowledge/search · GET /api/v1/memory/episodes
 ```
 
 **Conexiones reales en código hoy:**
@@ -111,6 +118,10 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 15. Hasta C5 solo se ejecutan herramientas `risk_level=read` sin `requires_approval`; lo demás → `APPROVAL_REQUIRED`. → Doc 05 §6.2.
 16. Los resultados de herramientas entran al modelo como bloque `system` etiquetado "DATOS NO CONFIABLES", truncado a 4000 caracteres, antes del último mensaje del usuario. → Doc 02 §16.
 17. La evidencia de las herramientas se devuelve al cliente en `AssistantResponse.sources`. → Doc 02 aceptación #12.
+18. Ingesta: `redact()` **antes** de hashear/trocear/indexar; el texto original con secretos nunca se guarda; documento marcado `sensitivity=redacted`. Dedupe por `(owner_id, content_hash)`. → Doc 03 §5, §11.
+19. Búsqueda: filtro por `owner_id` y estado **antes** del ranking; full-text (≥2 lexemas de la consulta) + vectorial (mismo perfil, distancia < 0,6) → RRF → máx. 2 chunks por documento. → Doc 03 §8.3.
+20. `knowledge_query` en el pipeline: se quita la frase de enrutado ("según mis documentos") antes de buscar; con resultados → fragmentos numerados como DATOS NO CONFIABLES + `sources` `doc:<id>#<chunk>`; **sin resultados → respuesta fija sin llamar al modelo**, estado `needs_input`. → Doc 03 §8.4, Doc 02 §2.9.
+21. Cada turno de chat deja un episodio `chat.turn` (resumen sanitizado, `task_id`, `correlation_id`). → Doc 03 §3.1.
 
 ## 3. Skills / herramientas usadas para iniciar
 
@@ -188,12 +199,28 @@ Diferido: paralelismo de pasos (C6); aislar adaptadores en proceso/contenedor (C
 - [ ] MCP Host/Client (SDK oficial, versión fijada tras prueba en Windows/Docker); descubrimiento → `review` → aprobación
 - [ ] Primer conector: **GitHub readonly** (`github.repository.get`)
 
+### ✅ M1/M2 — Episodios, documentos y RAG híbrido (HECHO) (Doc 03 §17)
+
+- [x] `backend/migrations/versions/0003_memory_knowledge.py` — 5 tablas, FTS `spanish` generado, vectores sin dimensión fija por perfil, episodios append-only
+- [x] `backend/nexus/knowledge/sanitize.py` — claves privadas, tokens GitHub/AWS/`sk-`, Bearer, `password|token|api_key = …`
+- [x] `backend/nexus/knowledge/chunking.py` — títulos Markdown, párrafos, corte duro con offsets exactos
+- [x] `backend/nexus/knowledge/embeddings.py` — `OnnxEmbedder` (onnxruntime + tokenizers, mean pooling + L2)
+- [x] `backend/nexus/knowledge/store.py` — `ingest_document`, `search` (híbrida RRF), `ensure_profile`
+- [x] `backend/nexus/memory/episodes.py` — `record`, `search` por tipo/rango temporal
+- [x] Pipeline: RAG para `knowledge_query`, abstención determinista, episodios; API: 3 endpoints nuevos; health informa del embedder
+- [x] `backend/tests/test_m1m2.py` — 18 tests (chunking, secretos, dedupe, perfil, citas, aislamiento por propietario, FTS solo, diversidad, episodios, API, RAG e2e, abstención, regresión "según mis documentos", embedder real)
+- [x] Prueba real: 7 documentos de NEXUS → 303 chunks en 26,6 s; Qwen responde con citas; "receta de la paella" → abstención
+
+Medido para calibrar: distancia coseno MiniLM — relevantes 0,32–0,60, irrelevantes ≥ 0,616. Umbral 0,6 (`NEXUS_RAG_MAX_DISTANCE`) con poco margen: recalibrar con un set de evaluación (Recall@k/MRR).
+
+Diferido: grafo semántico (M3), procedimientos (M4), consolidación/olvido/expiración (M5), índice HNSW por perfil (>100k chunks), ingesta en cola, PII con NER, chunking por tokens, PDF/DOCX.
+
 ### ⬜ T0/T1 — Text Learning (doc TL §12)
 
 - [ ] Esquema JSONL + taxonomía de intenciones (clases de Doc 02 §4)
 - [ ] Baseline TF-IDF + LogisticRegression con abstención → señal para el Intent Classifier del Core
 
-### ⬜ M1–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
+### ⬜ M3–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
 
 Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobaciones (C5).
 
@@ -210,6 +237,8 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
 | D6 | LLM: Qwen2.5-7B-Instruct Q4_K_M (GGUF, GPU). Embeddings: **pendiente** (M2) | LLM adoptado; benchmark comparativo pendiente | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
+| D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D16 | Sin evidencia en `knowledge_query` → abstención en código (no se llama al LLM) | Adoptada (medido: el LLM ignora "no inventes") | Doc 02 §2.9 |
 | D13 | Runtime de modelos **en proceso**: GGUF vía llama-cpp-python o clase Python propia; **no Ollama** ni servidores externos | Adoptada (decisión del propietario) | Doc 02 §10 |
 | D7 | SSE para estados de tarea (servidor → cliente), con id de `execution_events` | Adoptada (C1) | Doc 04 §9.2 |
 | D11 | Auth inicial: un token Bearer por instancia (`NEXUS_API_TOKEN`), un único propietario | Temporal hasta Fase 4 | Doc 04 §11 |
@@ -228,3 +257,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | Model Router: Ollama sustituido por GGUF en proceso (llama-cpp-python, extra `[gguf]`) + modelo Python propio | `pytest` 44 passed |
 | 2026-11-15 | C2: Planner, Executor, Verifier, herramienta interna `system.time.now`, replanificación, techo global | `pytest` 59 passed; uvicorn: tool sembrada, plan guardado, stub → `partial` |
 | 2026-11-15 | Modelo real: llama-cpp-python CUDA en venv, Qwen2.5-7B por GPU; prompt con capacidades reales; tests movidos a `nexus_test` y DB de desarrollo reiniciada (solo tenía datos de pruebas) | `pytest` 60 passed; API con Qwen: chat, GitHub → partial, hora → completed con fuente |
+| 2026-11-15 | M1/M2: episodios, ingesta con redacción de secretos, chunking, embeddings ONNX, búsqueda híbrida, RAG en el Core con abstención | `pytest` 77 passed; 7 docs de NEXUS ingeridos y consultados con Qwen |

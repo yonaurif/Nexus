@@ -188,7 +188,7 @@ def api(engine):
     from nexus.api.app import create_app
 
     def make(model, adapters=None):
-        return TestClient(create_app(engine=engine, model=model, api_token=TOKEN, adapters=adapters))
+        return TestClient(create_app(engine=engine, model=model, api_token=TOKEN, adapters=adapters, embedder=None))
     return make
 
 

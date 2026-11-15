@@ -32,7 +32,7 @@ def client_for(engine):
     from nexus.api.app import create_app
 
     def make(model):
-        return TestClient(create_app(engine=engine, model=model, api_token=TOKEN))
+        return TestClient(create_app(engine=engine, model=model, api_token=TOKEN, embedder=None))
     return make
 
 
@@ -148,7 +148,8 @@ def test_task_events_stream_and_resume(client_for):
 def test_health_reports_components(client_for):
     h = client_for(FakeModel()).get("/api/v1/system/health").json()
     assert h["status"] == "ok"
-    assert h["components"] == {"database": "ok", "model": {"name": "fake", "status": "ok"}}
+    assert h["components"] == {"database": "ok", "model": {"name": "fake", "status": "ok"},
+                             "embeddings": {"name": None, "status": "not_configured"}}
 
 
 def test_stub_model_is_partial_not_completed(client_for):

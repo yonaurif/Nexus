@@ -3,22 +3,33 @@ import json
 import secrets
 import time
 import uuid
+from datetime import datetime
 
 import sqlalchemy as sa
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 
 from nexus.config import env
-from nexus.contracts import AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, TaskView
+from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
+                             DocumentIngested, EpisodeView, KnowledgeHit, TaskView)
 from nexus.core import pipeline, task_store
 from nexus.gateway import internal_tools
+from nexus.knowledge import store as knowledge_store
+from nexus.memory import episodes
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
 STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input"}
 STREAM_MAX_S = 120
 
 
-def create_app(engine=None, model=None, api_token: str | None = None, adapters=None) -> FastAPI:
+AUTO = object()
+
+
+def create_app(engine=None, model=None, api_token: str | None = None, adapters=None,
+               embedder=AUTO) -> FastAPI:
+    if embedder is AUTO:
+        from nexus.knowledge.embeddings import get_embedder
+        embedder = get_embedder()  # None => RAG solo full-text
     if adapters is None:
         adapters = internal_tools.ADAPTERS
     if engine is None:
@@ -66,7 +77,7 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                                              correlation_id=corr)
             c.execute(sa.text("INSERT INTO messages (conversation_id, role, content, task_id) "
                               "VALUES (:c, 'user', :t, :k)"), {"c": conv, "t": req.message, "k": task_id})
-        bg.add_task(pipeline.run, engine, model, adapters, task_id, conv, req.message, corr)
+        bg.add_task(pipeline.run, engine, model, adapters, task_id, conv, req.message, corr, embedder)
         response.headers["X-Correlation-ID"] = corr
         return ChatAccepted(task_id=task_id, conversation_id=conv, correlation_id=corr)
 
@@ -111,6 +122,31 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
+    # --- Memory & Knowledge (Doc 03 §14, Doc 04 §9.1) ---
+    @app.post("/api/v1/knowledge/documents", status_code=201, response_model=DocumentIngested)
+    def ingest(doc: DocumentIn, owner: str = Depends(auth)):
+        # ponytail: síncrono; cola de ingesta (Doc 03 §4) cuando haya documentos grandes o conectores
+        r = knowledge_store.ingest_document(engine, owner, title=doc.title, text=doc.text, embedder=embedder,
+                                            uri_ref=doc.uri_ref, mime_type=doc.mime_type)
+        return DocumentIngested(**vars(r))
+
+    @app.get("/api/v1/knowledge/search")
+    def knowledge_search(q: str = Query(min_length=1, max_length=500), k: int = Query(5, ge=1, le=20),
+                         owner: str = Depends(auth)):
+        with engine.connect() as c:
+            hits = knowledge_store.search(c, owner, q, embedder, k=k)
+        return {"hits": [KnowledgeHit(source_ref=h.source_ref, **{f: getattr(h, f) for f in (
+            "document_id", "title", "heading", "text", "uri_ref", "char_start", "char_end", "score")})
+            for h in hits]}
+
+    @app.get("/api/v1/memory/episodes")
+    def list_episodes(event_type: str | None = None, since: datetime | None = None,
+                      until: datetime | None = None, limit: int = Query(50, ge=1, le=100),
+                      owner: str = Depends(auth)):
+        with engine.connect() as c:
+            rows = episodes.search(c, owner, event_type=event_type, since=since, until=until, limit=limit)
+        return {"episodes": [EpisodeView(**{k: getattr(r, k) for k in EpisodeView.model_fields}) for r in rows]}
+
     @app.get("/api/v1/system/health")
     def health():
         # Doc 04 §12: estados reales, nunca métricas inventadas.
@@ -122,8 +158,11 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
             db = "unavailable"
         model_status = model.health()
         ok = db == "ok" and model_status in ("ok", "stub")
+        emb = ({"name": embedder.model_name, "status": "configured"} if embedder is not None
+               else {"name": None, "status": "not_configured"})  # sin embedder el RAG es solo full-text
         return {"status": "ok" if ok else "degraded",
-                "components": {"database": db, "model": {"name": model.name, "status": model_status}}}
+                "components": {"database": db, "model": {"name": model.name, "status": model_status},
+                               "embeddings": emb}}
 
     return app
 

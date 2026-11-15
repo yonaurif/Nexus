@@ -95,6 +95,43 @@ class TaskView(Strict):
     response: AssistantResponse | None = None
 
 
+class DocumentIn(Strict):
+    title: str = Field(min_length=1, max_length=300)
+    text: str = Field(min_length=1, max_length=200_000)
+    uri_ref: str | None = Field(default=None, max_length=2000)
+    mime_type: Literal["text/plain", "text/markdown"] = "text/plain"
+
+
+class DocumentIngested(Strict):
+    document_id: str
+    chunks: int
+    deduplicated: bool
+    redactions: list[str]
+
+
+class KnowledgeHit(Strict):
+    source_ref: str
+    document_id: str
+    title: str
+    heading: str | None
+    text: str
+    uri_ref: str | None
+    char_start: int
+    char_end: int
+    score: float
+
+
+class EpisodeView(Strict):
+    episode_id: str
+    event_type: str
+    occurred_at: datetime
+    summary: str
+    sensitivity: str
+    conversation_id: str | None
+    task_id: str | None
+    correlation_id: str | None
+
+
 class CoreEvent(Strict):
     event_id: str
     event_type: str
