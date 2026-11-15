@@ -41,6 +41,7 @@ def client_for(engine):
     ("hola, ¿qué tal?", "conversation"),
     ("revisa mi repositorio de github", "agent_request"),
     ("recuérdame revisar el repositorio mañana", "task_request"),
+    ("¿qué hora es?", "task_request"),
     ("recuerda que prefiero respuestas cortas", "memory_update"),
     ("cada vez que publique un vídeo pídeme aprobación", "rule_proposal"),
     ("?!", "unknown"),

@@ -11,13 +11,16 @@ from fastapi.responses import StreamingResponse
 from nexus.config import env
 from nexus.contracts import AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, TaskView
 from nexus.core import pipeline, task_store
+from nexus.gateway import internal_tools
 
 OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en Fase 4 (Doc 04 §11)
 STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input"}
 STREAM_MAX_S = 120
 
 
-def create_app(engine=None, model=None, api_token: str | None = None) -> FastAPI:
+def create_app(engine=None, model=None, api_token: str | None = None, adapters=None) -> FastAPI:
+    if adapters is None:
+        adapters = internal_tools.ADAPTERS
     if engine is None:
         from nexus.db import get_engine
         engine = get_engine()
@@ -28,7 +31,10 @@ def create_app(engine=None, model=None, api_token: str | None = None) -> FastAPI
     if not token:
         raise RuntimeError("Define NEXUS_API_TOKEN (.env)")
 
-    app = FastAPI(title="NEXUS API", version="0.1.0")
+    with engine.begin() as c:
+        internal_tools.seed(c)
+
+    app = FastAPI(title="NEXUS API", version="0.2.0")
 
     def auth(authorization: str = Header(default="")) -> str:
         scheme, _, given = authorization.partition(" ")
@@ -60,7 +66,7 @@ def create_app(engine=None, model=None, api_token: str | None = None) -> FastAPI
                                              correlation_id=corr)
             c.execute(sa.text("INSERT INTO messages (conversation_id, role, content, task_id) "
                               "VALUES (:c, 'user', :t, :k)"), {"c": conv, "t": req.message, "k": task_id})
-        bg.add_task(pipeline.run, engine, model, task_id, conv, req.message)
+        bg.add_task(pipeline.run, engine, model, adapters, task_id, conv, req.message, corr)
         response.headers["X-Correlation-ID"] = corr
         return ChatAccepted(task_id=task_id, conversation_id=conv, correlation_id=corr)
 
@@ -71,7 +77,8 @@ def create_app(engine=None, model=None, api_token: str | None = None) -> FastAPI
             msg = c.execute(sa.text("SELECT content, metadata FROM messages WHERE task_id=:i "
                                     "AND role='assistant' ORDER BY id DESC LIMIT 1"), {"i": task_id}).first()
         resp = msg and AssistantResponse(text=msg.content, task_status=t.status,
-                                         warnings=msg.metadata.get("warnings", []))
+                                         warnings=msg.metadata.get("warnings", []),
+                                         sources=msg.metadata.get("sources", []))
         return TaskView(task_id=t.id, status=t.status, correlation_id=t.correlation_id, response=resp)
 
     @app.get("/api/v1/tasks/{task_id}/events")

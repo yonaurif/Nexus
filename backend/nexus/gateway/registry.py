@@ -58,6 +58,13 @@ class SqlToolRegistry:
             "UPDATE tools SET approved_hash = definition_hash, status = 'enabled', updated_at = now() "
             "WHERE tool_id = :t"), {"t": tool_id})
 
+    def list_enabled(self) -> list[ToolManifest]:
+        """Herramientas aprobadas y sin cambios: lo único que se ofrece al Planner."""
+        rows = self.conn.execute(sa.text(
+            "SELECT manifest, approved_hash FROM tools WHERE status = 'enabled' ORDER BY tool_id")).all()
+        tools = [ToolManifest(**r.manifest) for r in rows]
+        return [m for m, r in zip(tools, rows) if m.definition_hash == r.approved_hash]
+
     def resolve(self, tool_id: str) -> ToolManifest:
         row = self.conn.execute(sa.text(
             "SELECT manifest, approved_hash, status FROM tools WHERE tool_id = :t"), {"t": tool_id}).first()

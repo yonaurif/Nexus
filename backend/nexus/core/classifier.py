@@ -10,7 +10,8 @@ from nexus.contracts import RequestClass
 RULES: list[tuple[RequestClass, str]] = [
     ("rule_proposal", r"\b(cada vez que|siempre que|nunca (?:hagas|permitas))\b"),
     ("memory_update", r"\b(recuerda que|guarda que|mi nombre es|prefiero)\b"),
-    ("task_request", r"\b(recuérdame|recuerdame|programa|ejecuta|crea|envía|envia|haz)\b"),
+    ("task_request", r"\b(recuérdame|recuerdame|programa|ejecuta|crea|envía|envia|haz"
+                     r"|qu[eé] hora|qu[eé] d[ií]a|fecha de hoy)\b"),
     ("agent_request", r"\b(github|repositorios?|correos?|e-?mails?|youtube)\b"),
     ("knowledge_query", r"\b(documentaci[oó]n|qué dice|que dice|busca en)\b"),
 ]

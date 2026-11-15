@@ -1,15 +1,21 @@
-"""Plan Validator (Doc 02 §6.2). Rechaza antes de ejecutar: límites, deps, ciclos, tools, input."""
+"""Plan Validator (Doc 02 §6.2). Rechaza antes de ejecutar: límites, deps, ciclos, tools, riesgo, input."""
 from graphlib import CycleError, TopologicalSorter
 
 from nexus.contracts import Plan
-from nexus.gateway.registry import GatewayError, ToolRegistry
+from nexus.gateway.registry import GatewayError
+
+# Techo global: ningún plan (venga del LLM o no) puede superarlo (Doc 02 §11).
+CEILING = {"max_steps": 8, "max_duration_s": 60}
 
 
 class PlanRejected(ValueError):
     pass
 
 
-def validate_plan(plan: Plan, registry: ToolRegistry) -> None:
+def validate_plan(plan: Plan, registry) -> None:
+    for k, cap in CEILING.items():
+        if getattr(plan.limits, k) > cap:
+            raise PlanRejected(f"global ceiling: {k} > {cap}")
     if len(plan.steps) > plan.limits.max_steps:
         raise PlanRejected(f"max_steps exceeded ({len(plan.steps)}>{plan.limits.max_steps})")
 
@@ -33,6 +39,9 @@ def validate_plan(plan: Plan, registry: ToolRegistry) -> None:
             m = registry.resolve(s.tool_id or "")
         except GatewayError as e:
             raise PlanRejected(f"{e.code}: {s.tool_id}") from None
+        # ponytail: sin servicio de aprobaciones hasta C5, solo herramientas de lectura
+        if m.risk_level != "read" or m.requires_approval:
+            raise PlanRejected(f"APPROVAL_REQUIRED: {s.tool_id} ({m.risk_level})")
         # ponytail: solo 'required'; validación JSON Schema completa (jsonschema) en G1
         missing = set(m.input_schema.get("required", [])) - s.input.keys()
         if missing:

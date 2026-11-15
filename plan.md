@@ -14,7 +14,7 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 44 passed
+.venv/Scripts/python.exe -m pytest -q                              # 59 passed
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=C:/modelos/x.gguf   (+ pip install -e ".[gguf]"; opcional NEXUS_GGUF_CTX, NEXUS_GGUF_GPU_LAYERS)
@@ -42,20 +42,28 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
             [Frontend React]  (pendiente: Fase 1 de Doc 04)
                   │ HTTPS + Bearer NEXUS_API_TOKEN / SSE
                   v
-  nexus/api/app.py  create_app(engine, model, token)                  ✅ HECHO (C1)
+  nexus/api/app.py  create_app(engine, model, token, adapters)        ✅ HECHO (C1, C2)
+     al arrancar: internal_tools.seed() registra y aprueba system.time.now
      POST /api/v1/chat/messages  → 202 {task_id, conversation_id, correlation_id}
      GET  /api/v1/tasks/{id}      → TaskView + AssistantResponse
      GET  /api/v1/tasks/{id}/events → SSE (id = execution_events.id, soporta Last-Event-ID)
      GET  /api/v1/system/health   → database + model (estados reales)
                   │ BackgroundTasks
                   v
-  nexus/core/pipeline.py  run()                                       ✅ HECHO (C1)
+  nexus/core/pipeline.py  run()                                       ✅ HECHO (C1, C2)
      classifier.classify → _context (últimos 10 mensajes + SYSTEM_PROMPT)
-     → Plan(1 paso synthesis) → validate_plan → models.generate → verificar → messages
+     ┌─> planning ──> planner.propose(model, tools=list_enabled())   (solo task_request)
+     │      └─ fallo/JSON inválido/plan rechazado → synthesis_plan + PLAN_REJECTED
+     │   plan_validating → validate_plan (techo global, riesgo read) → planner.save_plan
+     │   running → executor.execute(engine, adapters, plan)
+     │      └─ resolve() otra vez · timeout · tamaño · output_schema · evidencia → tool_executions
+     │   verifying → verifier.verify → completed | partial | failed (+ retriable)
+     └── replan ×1 si failed y retriable (el Planner recibe los códigos de error)
+     → models.generate(contexto + resultados etiquetados "DATOS NO CONFIABLES") → messages (+ sources)
                   │                                  │
                   │                   nexus/core/models.py  StubModel | LlamaCppModel (GGUF) | tu clase ✅
                   v
-  nexus/core/state.py  <── estado de tarea ──  [Orchestrator real]    (pendiente: C2)
+  nexus/core/state.py  <── estado de tarea ── pipeline (orquestador)  ✅
         ^ transition()
         │
   nexus/core/task_store.py  create_task / set_status / get_status    ✅ HECHO (M0)
@@ -97,6 +105,11 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
 10. El clasificador solo enruta: `unknown` → `needs_input` sin llamar al modelo; clases sin capacidad todavía → respuesta + `partial` con `CAPABILITY_UNAVAILABLE`. → Doc 02 §4, §6.3.
 11. Fallo de modelo → tarea `failed`, aviso `MODEL_UNAVAILABLE`, detalle solo en logs; `StubModel` → `partial` con `MODEL_NOT_CONFIGURED`. Nunca éxito aparente. → Doc 02 aceptación #8.
 12. Token comparado con `secrets.compare_digest`; conversaciones y tareas filtradas por `owner_id` (404 si no son tuyas). → Doc 04 §11.
+13. El Planner **solo** propone `summary_for_user` + `steps`; `plan_id`, versión y límites los pone el sistema. Si el modelo intenta fijar `limits`, el plan se rechaza (`PLAN_UNPARSEABLE`). → Doc 02 §6.1, §11.
+14. El Planner solo ve `SqlToolRegistry.list_enabled()` (aprobadas con hash intacto); el Executor vuelve a llamar a `resolve()` justo antes de invocar. → Doc 02 aceptación #4–5.
+15. Hasta C5 solo se ejecutan herramientas `risk_level=read` sin `requires_approval`; lo demás → `APPROVAL_REQUIRED`. → Doc 05 §6.2.
+16. Los resultados de herramientas entran al modelo como bloque `system` etiquetado "DATOS NO CONFIABLES", truncado a 4000 caracteres, antes del último mensaje del usuario. → Doc 02 §16.
+17. La evidencia de las herramientas se devuelve al cliente en `AssistantResponse.sources`. → Doc 02 aceptación #12.
 
 ## 3. Skills / herramientas usadas para iniciar
 
@@ -154,12 +167,18 @@ Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real;
 
 **Siguiente paso de modelo (D6):** con 8 GB de VRAM caben GGUF de 7–8B en Q4_K_M (unos 5 GB) con todas las capas en GPU. Hace falta `llama-cpp-python` compilado con CUDA en el venv (la instalación global es solo CPU) y elegir un GGUF multilingüe. Alternativa: tu propia clase Python con el contrato de `models.py`.
 
-### ⬜ C2 — Planner/Executor/Verifier (Doc 02 §6–8)
+### ✅ C2 — Planner/Executor/Verifier (HECHO) (Doc 02 §6–8, §11)
 
-- [ ] Executor que solo invoca `ToolRegistry.resolve(...)` + adaptador simulado
-- [ ] Verifier: compara `success_criteria` con `ToolResult`; distingue succeeded/partial/failed/sin evidencia
-- [ ] Presupuestos (pasos, tiempo) y replanificación limitada (`verifying → planning`)
-- [ ] Test integración: chat → plan → validator → tool simulada → verifier → respuesta (Doc 02 §17.2)
+- [x] `backend/nexus/core/planner.py` — `propose()` (JSON del modelo, admite ```json```), `synthesis_plan()`, `save_plan()` → `plans`/`plan_steps`
+- [x] `backend/nexus/core/executor.py` — orden topológico, re-`resolve`, timeout por herramienta y presupuesto total, validación de salida, `DEPENDENCY_FAILED`, `BUDGET_EXCEEDED`, registro en `tool_executions`
+- [x] `backend/nexus/core/verifier.py` — `Verdict(completed|partial|failed, warnings, retriable)`; sin evidencia ≠ éxito
+- [x] `backend/nexus/gateway/internal_tools.py` — `system.time.now` (determinista, sin red) + `seed()`
+- [x] `plan_validator.py` — techo global (`max_steps` 8, `max_duration_s` 60) y bloqueo de riesgo ≠ `read`
+- [x] `SqlToolRegistry.list_enabled()`
+- [x] Pipeline con replanificación limitada (1) y fuentes en la respuesta
+- [x] `backend/tests/test_c2.py` — 15 tests: verifier, techo, riesgo, planner, executor (7 resultados normalizados), registro sin argumentos, e2e con fuentes, herramienta desconocida, replan tras fallo transitorio
+
+Diferido: paralelismo de pasos (C6); aislar adaptadores en proceso/contenedor (C6); `success_criteria` estructurados; cancelación cooperativa (C5).
 
 ### ⬜ G1/G2 — REST y MCP readonly (Doc 05 §7–8)
 
@@ -205,3 +224,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | M0: Postgres+pgvector levantado, migración 0001, task_store, SqlToolRegistry | `pytest` 21 passed contra Postgres real; `alembic downgrade base` + `upgrade head` OK |
 | 2026-11-15 | C1: API FastAPI, pipeline conversacional, clasificador, Model Router, SSE, migración 0002 | `pytest` 41 passed; uvicorn + curl de punta a punta |
 | 2026-11-15 | Model Router: Ollama sustituido por GGUF en proceso (llama-cpp-python, extra `[gguf]`) + modelo Python propio | `pytest` 44 passed |
+| 2026-11-15 | C2: Planner, Executor, Verifier, herramienta interna `system.time.now`, replanificación, techo global | `pytest` 59 passed; uvicorn: tool sembrada, plan guardado, stub → `partial` |
