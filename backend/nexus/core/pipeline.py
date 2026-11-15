@@ -46,7 +46,13 @@ def _context(engine, conversation_id: str) -> list[dict]:
         rows = c.execute(sa.text(
             "SELECT role, content FROM messages WHERE conversation_id=:c "
             "ORDER BY id DESC LIMIT :n"), {"c": conversation_id, "n": HISTORY_LIMIT}).all()
-    return [{"role": "system", "content": SYSTEM_PROMPT}] + [
+        tools = SqlToolRegistry(c).list_enabled()
+    # Capacidades reales desde el registro: el modelo no debe prometer lo que NEXUS no puede hacer.
+    caps = "; ".join(f"{t.tool_id}: {t.description}" for t in tools) or "ninguna"
+    system = (f"{SYSTEM_PROMPT}\nCapacidades actuales: conversar y estas herramientas: {caps}. "
+              "No afirmes tener otras capacidades (internet, correo, calendario, recordatorios, "
+              "archivos...): si te piden algo así, di que aún no está disponible.")
+    return [{"role": "system", "content": system}] + [
         {"role": r.role, "content": r.content} for r in reversed(rows)]
 
 

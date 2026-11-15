@@ -13,6 +13,7 @@ Selección (por orden):
 """
 import importlib
 import importlib.util
+import os
 import threading
 from pathlib import Path
 
@@ -38,6 +39,16 @@ class StubModel:
         return "stub"
 
 
+def _add_cuda_dll_dirs() -> None:
+    """Windows: CUDA 13 deja cudart/cublas en bin\\x64, fuera de la búsqueda de DLL de Python."""
+    cuda = os.environ.get("CUDA_PATH")
+    if os.name != "nt" or not cuda:
+        return
+    for sub in ("bin", "bin/x64"):
+        if (p := Path(cuda) / sub).is_dir():
+            os.add_dll_directory(str(p))
+
+
 class LlamaCppModel:
     """Modelo GGUF cargado en el propio proceso con llama-cpp-python."""
 
@@ -52,6 +63,7 @@ class LlamaCppModel:
         if self._llama is None:
             cls = self._llama_cls
             if cls is None:
+                _add_cuda_dll_dirs()
                 from llama_cpp import Llama  # import perezoso: dependencia opcional [gguf]
                 cls = Llama
             self._llama = cls(model_path=str(self.path), n_ctx=self.n_ctx,

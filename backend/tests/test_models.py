@@ -45,6 +45,7 @@ def test_gguf_missing_file_is_reported(tmp_path):
 
 
 def test_router_selection(monkeypatch, tmp_path):
+    monkeypatch.setattr("nexus.config._dotenv", lambda: {})  # aislar del .env local
     for k in ("NEXUS_MODEL", "NEXUS_GGUF_PATH"):
         monkeypatch.delenv(k, raising=False)
     assert isinstance(get_model(), StubModel)

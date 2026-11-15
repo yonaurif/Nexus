@@ -8,16 +8,17 @@
 
 **Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · FastAPI 0.163 · uvicorn 0.54 · httpx 0.28 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
 
-**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). Python global tiene `llama-cpp-python` 0.2.90 **solo CPU**; el venv del proyecto aún no. No hay `.gguf` descargados.
+**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). CUDA 13.3 + VS 2022 Build Tools. `llama-cpp-python` 0.3.37 **compilado con CUDA** en el venv (`sm_86`, 66 min), `gpu_offload True`. Modelos GGUF en `C:\Worker Primitivo\models` (Qwen2.5-7B, Qwen3-4B, Hermes-3-8B, Yi-1.5-9B, gemma-2-9b, todos Q4_K_M).
 
 **Arranque local:**
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 59 passed
+.venv/Scripts/python.exe -m pytest -q                              # 60 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
-#   NEXUS_GGUF_PATH=C:/modelos/x.gguf   (+ pip install -e ".[gguf]"; opcional NEXUS_GGUF_CTX, NEXUS_GGUF_GPU_LAYERS)
+#   NEXUS_GGUF_PATH=C:/Worker Primitivo/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf   (activo; NEXUS_GGUF_CTX=4096, NEXUS_GGUF_GPU_LAYERS=-1)
+#   reinstalar con CUDA: CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
 #   NEXUS_MODEL=paquete.modulo:Clase    (tu propia IA en Python; tiene prioridad)
 ```
 
@@ -165,7 +166,7 @@ Pendiente de M0 que se difiere: `plans`/`plan_steps`/`tool_executions` tienen ta
 
 Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real; presupuesto de contexto por tokens → cuando haya tokenizador del modelo elegido.
 
-**Siguiente paso de modelo (D6):** con 8 GB de VRAM caben GGUF de 7–8B en Q4_K_M (unos 5 GB) con todas las capas en GPU. Hace falta `llama-cpp-python` compilado con CUDA en el venv (la instalación global es solo CPU) y elegir un GGUF multilingüe. Alternativa: tu propia clase Python con el contrato de `models.py`.
+**Modelo activo (D6):** Qwen2.5-7B-Instruct Q4_K_M en GPU: carga 7 s, respuesta corta ~1,6 s. Probado por la API: chat, petición no disponible (GitHub → `partial`) y "¿qué hora es?" → Planner propone `system.time.now` → `completed` con fuente `internal:system_clock`. El prompt de sistema lista las herramientas reales del registro para que el modelo no prometa capacidades inexistentes.
 
 ### ✅ C2 — Planner/Executor/Verifier (HECHO) (Doc 02 §6–8, §11)
 
@@ -207,7 +208,8 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | D9 | SQL explícito con `sa.text` (SQLAlchemy Core), sin ORM; migraciones Alembic en SQL plano | Adoptada | ponytail / Doc 03 §7 |
 | D10 | Append-only forzado por trigger en Postgres | Adoptada | Doc 03 §3.1 |
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
-| D6 | Modelo LLM/embeddings | **Pendiente** qué GGUF; hardware conocido (RTX 3050 8 GB) | Doc 02 §10, Doc 03 §8.1 |
+| D6 | LLM: Qwen2.5-7B-Instruct Q4_K_M (GGUF, GPU). Embeddings: **pendiente** (M2) | LLM adoptado; benchmark comparativo pendiente | Doc 02 §10, Doc 03 §8.1 |
+| D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D13 | Runtime de modelos **en proceso**: GGUF vía llama-cpp-python o clase Python propia; **no Ollama** ni servidores externos | Adoptada (decisión del propietario) | Doc 02 §10 |
 | D7 | SSE para estados de tarea (servidor → cliente), con id de `execution_events` | Adoptada (C1) | Doc 04 §9.2 |
 | D11 | Auth inicial: un token Bearer por instancia (`NEXUS_API_TOKEN`), un único propietario | Temporal hasta Fase 4 | Doc 04 §11 |
@@ -225,3 +227,4 @@ Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobac
 | 2026-11-15 | C1: API FastAPI, pipeline conversacional, clasificador, Model Router, SSE, migración 0002 | `pytest` 41 passed; uvicorn + curl de punta a punta |
 | 2026-11-15 | Model Router: Ollama sustituido por GGUF en proceso (llama-cpp-python, extra `[gguf]`) + modelo Python propio | `pytest` 44 passed |
 | 2026-11-15 | C2: Planner, Executor, Verifier, herramienta interna `system.time.now`, replanificación, techo global | `pytest` 59 passed; uvicorn: tool sembrada, plan guardado, stub → `partial` |
+| 2026-11-15 | Modelo real: llama-cpp-python CUDA en venv, Qwen2.5-7B por GPU; prompt con capacidades reales; tests movidos a `nexus_test` y DB de desarrollo reiniciada (solo tenía datos de pruebas) | `pytest` 60 passed; API con Qwen: chat, GitHub → partial, hora → completed con fuente |

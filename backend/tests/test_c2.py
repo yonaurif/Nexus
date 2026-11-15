@@ -233,3 +233,10 @@ def test_e2e_replans_once_after_retriable_failure(api, engine):
     with engine.connect() as c:
         assert c.scalar(sa.text("SELECT count(*) FROM plans WHERE task_id=:t"), {"t": tid}) == 2
     assert "CONNECTOR_UNAVAILABLE" in json.dumps(model.calls[1], ensure_ascii=False)  # el Planner recibe el fallo
+
+
+def test_system_prompt_lists_only_real_capabilities(api):
+    model = ScriptedModel([], answer="Puedo decirte la hora.")
+    ask(api(model), "hola, ¿qué puedes hacer?")
+    system = model.calls[-1][0]["content"]
+    assert "system.time.now" in system and "No afirmes tener otras capacidades" in system
