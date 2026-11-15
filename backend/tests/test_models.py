@@ -1,5 +1,5 @@
 """Model Router (Doc 02 §10): GGUF local en proceso o modelo Python propio; sin servicios externos."""
-from nexus.core.models import LlamaCppModel, StubModel, get_model
+from nexus.core.models import FallbackModel, LlamaCppModel, StubModel, get_model
 
 
 class FakeLlama:
@@ -51,7 +51,7 @@ def test_router_selection(monkeypatch, tmp_path):
     assert isinstance(get_model(), StubModel)
 
     monkeypatch.setenv("NEXUS_GGUF_PATH", str(tmp_path / "m.gguf"))
-    assert isinstance(get_model(), LlamaCppModel)
+    assert isinstance(get_model(), FallbackModel)
 
     monkeypatch.setenv("NEXUS_MODEL", "tests.test_models:MyOwnModel")  # tiene prioridad
     assert get_model().generate([]) == "respuesta propia"

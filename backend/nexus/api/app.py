@@ -19,7 +19,7 @@ from nexus.config import env
 from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
-from nexus.core import pipeline, task_store
+from nexus.core import hardware, pipeline, task_store
 from nexus.gateway import internal_tools
 from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
@@ -242,9 +242,12 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         ok = db == "ok" and model_status in ("ok", "stub")
         emb = ({"name": embedder.model_name, "status": "configured"} if embedder is not None
                else {"name": None, "status": "not_configured"})  # sin embedder el RAG es solo full-text
+        model_info = {"name": model.name, "status": model_status}
+        if details := getattr(model, "details", None):  # cadena GGUF: activo, candidatos, capas en GPU
+            model_info.update(details())
         return {"status": "ok" if ok else "degraded",
-                "components": {"database": db, "model": {"name": model.name, "status": model_status},
-                               "embeddings": emb}}
+                "components": {"database": db, "model": model_info, "embeddings": emb,
+                               "hardware": hardware.get_hardware_info()}}
 
     return app
 

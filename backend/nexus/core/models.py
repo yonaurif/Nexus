@@ -8,16 +8,22 @@ Contrato de un modelo (sirve para tu propia IA en Python):
 
 Selección (por orden):
     NEXUS_MODEL="paquete.modulo:Clase"  -> tu clase, instanciada sin argumentos
-    NEXUS_GGUF_PATH="C:/modelos/x.gguf" -> llama-cpp-python (pip install -e ".[gguf]")
+    NEXUS_GGUF_PATH="a.gguf;b.gguf"     -> cadena GGUF con respaldo (pip install -e ".[gguf]")
+        NEXUS_GGUF_GPU_LAYERS=auto|N    -> capas en GPU según la VRAM libre del equipo (por defecto auto)
     nada                                -> StubModel
 """
 import importlib
 import importlib.util
+import logging
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
 from nexus.config import env
+
+log = logging.getLogger("nexus.models")
 
 SYSTEM_PROMPT = (
     "Eres NEXUS, un asistente personal. Responde en español, de forma clara y breve. "
@@ -49,31 +55,124 @@ def _add_cuda_dll_dirs() -> None:
             os.add_dll_directory(str(p))
 
 
-class LlamaCppModel:
-    """Modelo GGUF cargado en el propio proceso con llama-cpp-python."""
+_THINK = re.compile(r"<think>.*?(?:</think>|\Z)", re.S | re.I)
 
-    def __init__(self, path: str, n_ctx: int = 4096, n_gpu_layers: int = -1,
-                 max_tokens: int = 512, llama_cls=None):
+
+def strip_reasoning(text: str) -> str:
+    """Modelos de razonamiento (Qwen3, DeepSeek-R1...) emiten <think>…</think>: NEXUS no expone
+    razonamiento interno (Doc 02 §1.2, §15). Un bloque sin cerrar (cortado por max_tokens) también se quita."""
+    return _THINK.sub("", text).strip()
+
+
+# --- Capas en GPU según la VRAM libre (Primitivo Worker engine_llamacpp.py) --------------------
+VRAM_MARGIN = 0.92   # no llenar la VRAM del todo: el KV-cache y otras apps necesitan hueco
+OVERHEAD_GB = 0.6    # KV-cache + buffers de cálculo
+RETRY_AFTER_S = 300  # un modelo que falló se vuelve a probar pasado este tiempo
+
+
+def auto_gpu_layers(size_gb: float, vram_free_gb: float, block_count: int, offload: bool) -> int:
+    """-1 (todas) si el modelo cabe con margen; si no, la proporción que cabe (GPU+CPU);
+    0 sin GPU, sin hueco útil o con llama-cpp compilado solo para CPU."""
+    if not offload or vram_free_gb <= 0:
+        return 0
+    usable = vram_free_gb * VRAM_MARGIN - OVERHEAD_GB
+    if usable >= size_gb:
+        return -1
+    if usable <= 0:
+        return 0
+    return max(0, int(block_count * usable / size_gb))
+
+
+def _gpu_offload() -> bool:
+    try:
+        _add_cuda_dll_dirs()
+        import llama_cpp
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        return False
+
+
+class LlamaCppModel:
+    """Modelo GGUF cargado en el propio proceso con llama-cpp-python.
+    `n_gpu_layers="auto"` decide al cargar según la VRAM libre del equipo donde corre (D19)."""
+
+    def __init__(self, path: str, n_ctx: int = 4096, n_gpu_layers: int | str = "auto",
+                 max_tokens: int = 512, llama_cls=None, hardware=None, offload: bool | None = None,
+                 block_count: int | None = None):
         self.path, self.n_ctx, self.n_gpu_layers, self.max_tokens = Path(path), n_ctx, n_gpu_layers, max_tokens
         self.name = f"gguf:{self.path.name}"
         self._llama_cls, self._llama = llama_cls, None
+        self._hardware, self._offload, self._block_count = hardware, offload, block_count
+        self.gpu_layers: int | None = None  # las realmente usadas en la última carga
         self._lock = threading.Lock()  # llama.cpp no es thread-safe; BackgroundTasks usa un pool
 
-    def _load(self):
-        if self._llama is None:
-            cls = self._llama_cls
-            if cls is None:
-                _add_cuda_dll_dirs()
-                from llama_cpp import Llama  # import perezoso: dependencia opcional [gguf]
-                cls = Llama
-            self._llama = cls(model_path=str(self.path), n_ctx=self.n_ctx,
-                              n_gpu_layers=self.n_gpu_layers, verbose=False)
-        return self._llama
+    @property
+    def size_gb(self) -> float:
+        return self.path.stat().st_size / 1024 ** 3
+
+    def _cls(self):
+        if self._llama_cls is None:
+            _add_cuda_dll_dirs()
+            from llama_cpp import Llama  # import perezoso: dependencia opcional [gguf]
+            self._llama_cls = Llama
+        return self._llama_cls
+
+    def _hw(self) -> dict:
+        if self._hardware is not None:
+            return self._hardware()
+        from nexus.core.hardware import get_hardware_info
+        return get_hardware_info()
+
+    def _offload_ok(self) -> bool:
+        return _gpu_offload() if self._offload is None else self._offload
+
+    def _blocks(self) -> int:
+        """Capas del GGUF desde sus metadatos (solo vocabulario); 32 si no se puede leer (Worker)."""
+        if self._block_count is None:
+            try:
+                md = self._cls()(model_path=str(self.path), vocab_only=True, verbose=False).metadata
+                self._block_count = int(next(v for k, v in md.items() if k.endswith(".block_count")))
+            except Exception:
+                self._block_count = 32
+        return self._block_count
+
+    def resolve_gpu_layers(self) -> int:
+        if self.n_gpu_layers != "auto":
+            return int(self.n_gpu_layers)
+        offload = self._offload_ok()
+        vram_free = self._hw()["vram_free_gb"] if offload else 0.0
+        return auto_gpu_layers(self.size_gb, vram_free, self._blocks(), offload)
+
+    def fits(self) -> str | None:
+        """None si cabe en RAM libre + VRAM útil; si no, el motivo. Heurística del Worker
+        (model_catalog.recommend): no modela con precisión el reparto GPU+CPU."""
+        hw = self._hw()
+        usable_vram = max(0.0, hw["vram_free_gb"] * VRAM_MARGIN - OVERHEAD_GB) if self._offload_ok() else 0.0
+        need, have = self.size_gb + OVERHEAD_GB, hw["ram_free_gb"] + usable_vram
+        if need > have:
+            return f"INSUFFICIENT_MEMORY: necesita ~{need:.1f} GB, hay {have:.1f} GB (RAM + VRAM útil)"
+        return None
+
+    def load(self):
+        with self._lock:
+            if self._llama is None:
+                layers = self.resolve_gpu_layers()
+                self._llama = self._cls()(model_path=str(self.path), n_ctx=self.n_ctx,
+                                          n_gpu_layers=layers, verbose=False)
+                self.gpu_layers = layers
+            return self._llama
+
+    _load = load  # compatibilidad
+
+    def unload(self) -> None:
+        with self._lock:
+            self._llama = None
 
     def generate(self, messages: list[dict]) -> str:
+        llama = self.load()
         with self._lock:
-            out = self._load().create_chat_completion(messages=messages, max_tokens=self.max_tokens)
-        return out["choices"][0]["message"]["content"].strip()
+            out = llama.create_chat_completion(messages=messages, max_tokens=self.max_tokens)
+        return strip_reasoning(out["choices"][0]["message"]["content"])
 
     def health(self) -> str:
         if not self.path.is_file():
@@ -81,6 +180,79 @@ class LlamaCppModel:
         if self._llama_cls is None and importlib.util.find_spec("llama_cpp") is None:
             return "runtime_missing"
         return "ok"
+
+
+class FallbackModel:
+    """Cadena de modelos GGUF en orden de preferencia (Primitivo gala/model_fallback.py).
+    - descarta sin cargar los que no caben en este equipo;
+    - si uno falla al cargar o al generar, lo libera y prueba el siguiente (un solo modelo en memoria);
+    - un error de la petición (p. ej. contexto excedido) no cambia de modelo: otro no lo arregla;
+    - un modelo fallido se vuelve a probar pasados RETRY_AFTER_S.
+    ponytail: sin vuelta automática al principal mientras el de respaldo funcione (Primitivo sí la hace)."""
+    configured = True
+
+    def __init__(self, candidates: list[LlamaCppModel]):
+        self.candidates = candidates
+        self.active: LlamaCppModel | None = None
+        self._state = {id(c): {"status": "untried", "reason": None, "failed_at": 0.0} for c in candidates}
+        self._lock = threading.Lock()
+
+    @property
+    def name(self) -> str:
+        return self.active.name if self.active else (self.candidates[0].name if self.candidates else "gguf:none")
+
+    def _usable(self, c: LlamaCppModel) -> bool:
+        st = self._state[id(c)]
+        return st["status"] not in ("failed", "unfit") or time.monotonic() - st["failed_at"] >= RETRY_AFTER_S
+
+    def _fail(self, c: LlamaCppModel, status: str, reason: str) -> None:
+        self._state[id(c)].update(status=status, reason=reason, failed_at=time.monotonic())
+        c.unload()
+        if self.active is c:
+            self.active = None
+
+    def generate(self, messages: list[dict]) -> str:
+        with self._lock:
+            order = ([self.active] if self.active else []) + [c for c in self.candidates if c is not self.active]
+            for c in order:
+                if not self._usable(c):
+                    continue
+                if c is not self.active:
+                    if reason := (c.fits() if c.path.is_file() else "MODEL_MISSING"):
+                        self._fail(c, "unfit", reason)
+                        continue
+                    if self.active:
+                        self.active.unload()  # liberar memoria antes de cargar otro
+                        self.active = None
+                    try:
+                        c.load()
+                    except Exception:
+                        log.exception("model load failed: %s", c.name)
+                        self._fail(c, "failed", "LOAD_FAILED")
+                        continue
+                    self.active = c
+                try:
+                    text = c.generate(messages)
+                except ValueError:
+                    raise  # petición inválida para cualquier modelo
+                except Exception as e:
+                    log.exception("model runtime failure: %s", c.name)
+                    self._fail(c, "failed", f"RUNTIME_ERROR:{type(e).__name__}")
+                    continue
+                self._state[id(c)].update(status="ok", reason=None)
+                return text
+        raise RuntimeError("NO_MODEL_AVAILABLE")
+
+    def health(self) -> str:
+        if self.active is not None:
+            return "ok"
+        return "ok" if any(self._usable(c) for c in self.candidates) else "unavailable"
+
+    def details(self) -> dict:
+        return {"active": self.active.name if self.active else None,
+                "candidates": [{"name": c.name, "status": self._state[id(c)]["status"],
+                                "reason": self._state[id(c)]["reason"], "gpu_layers": c.gpu_layers}
+                               for c in self.candidates]}
 
 
 def _load_custom(spec: str):
@@ -91,7 +263,9 @@ def _load_custom(spec: str):
 def get_model():
     if spec := env("NEXUS_MODEL"):
         return _load_custom(spec)
-    if path := env("NEXUS_GGUF_PATH"):
-        return LlamaCppModel(path, n_ctx=int(env("NEXUS_GGUF_CTX", "4096")),
-                             n_gpu_layers=int(env("NEXUS_GGUF_GPU_LAYERS", "-1")))
+    if paths := [p.strip() for p in (env("NEXUS_GGUF_PATH") or "").split(";") if p.strip()]:
+        layers = env("NEXUS_GGUF_GPU_LAYERS", "auto")
+        n_ctx = int(env("NEXUS_GGUF_CTX", "4096"))
+        return FallbackModel([LlamaCppModel(p, n_ctx=n_ctx, n_gpu_layers=layers if layers == "auto" else int(layers))
+                              for p in paths])
     return StubModel()

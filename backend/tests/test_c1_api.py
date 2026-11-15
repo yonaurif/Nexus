@@ -148,8 +148,10 @@ def test_task_events_stream_and_resume(client_for):
 def test_health_reports_components(client_for):
     h = client_for(FakeModel()).get("/api/v1/system/health").json()
     assert h["status"] == "ok"
-    assert h["components"] == {"database": "ok", "model": {"name": "fake", "status": "ok"},
-                             "embeddings": {"name": None, "status": "not_configured"}}
+    comp = h["components"]
+    assert comp["database"] == "ok" and comp["model"] == {"name": "fake", "status": "ok"}
+    assert comp["embeddings"] == {"name": None, "status": "not_configured"}
+    assert comp["hardware"]["ram_total_gb"] > 0 and "vram_free_gb" in comp["hardware"]  # real, no inventado
 
 
 def test_stub_model_is_partial_not_completed(client_for):
