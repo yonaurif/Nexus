@@ -1,11 +1,13 @@
 """Backend API v1 (Doc 04 §9.1). Ejecutar: uvicorn nexus.api.app:app --host 127.0.0.1"""
 import json
+import logging
 import mimetypes
 import secrets
 import tempfile
+import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -15,10 +17,11 @@ from fastapi.responses import StreamingResponse
 
 from nexus.config import env
 from nexus.contracts import (AssistantResponse, ChatAccepted, ChatRequest, CoreEvent, DocumentIn,
-                             DocumentIngested, EpisodeView, FileIngested, KnowledgeHit, TaskView)
+                             DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
+                             TaskView)
 from nexus.core import pipeline, task_store
 from nexus.gateway import internal_tools
-from nexus.knowledge import extract
+from nexus.knowledge import extract, sources
 from nexus.knowledge import store as knowledge_store
 from nexus.memory import episodes
 
@@ -26,13 +29,29 @@ OWNER = "owner"  # ponytail: un único propietario por token; perfiles/roles en 
 STREAM_END = {"completed", "partial", "failed", "cancelled", "expired", "needs_input"}
 STREAM_MAX_S = 120
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # ponytail: límite fijo; por tipo/propietario cuando haya cuotas
+SYNC_TICK_S = 60
 
 
 AUTO = object()
 
 
+def _start_sync_scheduler(engine, embedder) -> None:
+    """Revisa cada SYNC_TICK_S qué carpetas cumplieron su intervalo y las sincroniza.
+    ponytail: un hilo y pasadas secuenciales (no APScheduler como Primitivo); el advisory lock
+    evita solaparse con una pasada manual. Subir a cola de trabajos si hay muchas fuentes."""
+    def loop():
+        while True:
+            time.sleep(SYNC_TICK_S)
+            try:
+                for sid in sources.due_sources(engine, datetime.now(timezone.utc)):
+                    sources.sync_folder(engine, sid, embedder, trigger="schedule")
+            except Exception:
+                logging.getLogger("nexus.scheduler").exception("scheduled sync failed")
+    threading.Thread(target=loop, name="nexus-sync", daemon=True).start()
+
+
 def create_app(engine=None, model=None, api_token: str | None = None, adapters=None,
-               embedder=AUTO) -> FastAPI:
+               embedder=AUTO, start_scheduler: bool = False) -> FastAPI:
     if embedder is AUTO:
         from nexus.knowledge.embeddings import get_embedder
         embedder = get_embedder()  # None => RAG solo full-text
@@ -50,6 +69,8 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
 
     with engine.begin() as c:
         internal_tools.seed(c)
+    if start_scheduler:
+        _start_sync_scheduler(engine, embedder)
 
     app = FastAPI(title="NEXUS API", version="0.2.0")
 
@@ -159,6 +180,38 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
                                             source_type="file_upload")
         return FileIngested(**vars(r), ocr_used=got.ocr_used)
 
+    # --- Carpetas sincronizadas (Doc 03 §4–5) ---
+    @app.post("/api/v1/knowledge/sources", status_code=201)
+    def add_source(src: FolderSourceIn, owner: str = Depends(auth)):
+        try:
+            sid = sources.register_folder(engine, owner, src.path, interval_minutes=src.interval_minutes,
+                                          ocr=src.ocr, display_name=src.display_name)
+        except sources.SourceError as e:
+            raise HTTPException({"PATH_NOT_ALLOWED": 403, "ALREADY_REGISTERED": 409}.get(e.code, 422), e.code)
+        return {"source_id": sid}
+
+    @app.get("/api/v1/knowledge/sources")
+    def list_sources(owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return {"sources": sources.list_folders(c, owner)}
+
+    def owned_source(source_id: str, owner: str) -> None:
+        with engine.connect() as c:
+            if not sources.owned(c, owner, source_id):
+                raise HTTPException(404, "SOURCE_NOT_FOUND")
+
+    @app.post("/api/v1/knowledge/sources/{source_id}/sync", status_code=202)
+    def sync_source(source_id: str, bg: BackgroundTasks, force: bool = False, owner: str = Depends(auth)):
+        owned_source(source_id, owner)
+        bg.add_task(sources.sync_folder, engine, source_id, embedder, "manual", force)
+        return {"source_id": source_id, "status": "queued"}
+
+    @app.get("/api/v1/knowledge/sources/{source_id}/runs")
+    def source_runs(source_id: str, owner: str = Depends(auth)):
+        owned_source(source_id, owner)
+        with engine.connect() as c:
+            return {"runs": sources.runs(c, source_id)}
+
     @app.get("/api/v1/knowledge/search")
     def knowledge_search(q: str = Query(min_length=1, max_length=500), k: int = Query(5, ge=1, le=20),
                          owner: str = Depends(auth)):
@@ -198,5 +251,5 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
 
 def __getattr__(name):  # `uvicorn nexus.api.app:app` sin crear la app al importar el módulo
     if name == "app":
-        return create_app()
+        return create_app(start_scheduler=True)
     raise AttributeError(name)

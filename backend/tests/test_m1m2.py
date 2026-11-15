@@ -60,7 +60,8 @@ def test_chunks_keep_exact_offsets_and_headings():
     for c in chunks:
         assert DOC[c.start:c.end] == c.text and len(c.text) <= 400
     assert chunks[0].heading == "Proyecto Atlas"
-    assert any(c.heading == "Despliegue" and "Docker" in c.text for c in chunks)
+    # ruta completa de títulos: el fragmento sabe de qué documento/sección forma parte
+    assert any(c.heading == "Proyecto Atlas › Despliegue" and "Docker" in c.text for c in chunks)
     assert [c.index for c in chunks] == list(range(len(chunks)))
 
 
@@ -113,7 +114,7 @@ def test_search_finds_relevant_chunk_with_citation(engine, emb):
     with engine.connect() as c:
         hits = store.search(c, o, "¿cómo se despliega Atlas con Docker?", emb)
     assert hits and hits[0].document_id == doc.document_id and "Docker" in hits[0].text
-    assert hits[0].title == "Atlas" and hits[0].uri_ref == "file://atlas.md" and hits[0].heading == "Despliegue"
+    assert hits[0].title == "Atlas" and hits[0].uri_ref == "file://atlas.md" and hits[0].heading == "Proyecto Atlas › Despliegue"
 
 
 def test_search_never_crosses_owners(engine, emb):
@@ -278,3 +279,30 @@ def test_reembed_missing_fills_new_profile_without_touching_old(engine):
             {"d": doc.document_id}).all())
         assert counts == {64: doc.chunks, 32: doc.chunks}
         assert store.search(c, o, "despliegue Docker", new)  # el perfil nuevo ya busca
+
+
+def test_heading_path_resets_on_same_or_higher_level():
+    text = "\n\n".join(["# A", "uno", "## B", "dos", "### C", "tres", "## D", "cuatro", "# E", "cinco"])
+    assert [c.heading for c in chunk_text(text, max_chars=50)] == ["A", "A › B", "A › B › C", "A › D", "E"]
+
+
+def test_named_entity_filter():
+    from nexus.knowledge.store import Hit, filter_by_names
+    h = lambda title, text: Hit("d", 0, title, None, text, None, 0, 0, 1.0)
+    nexus = h("03_NEXUS", "PostgreSQL como fuente de verdad")
+    worker = h("worker/README.md", "Primitivo Worker usa el puerto 9700")
+    assert filter_by_names("¿qué base de datos usa Primitivo Suite?", [nexus, worker]) == [worker]
+    assert filter_by_names("¿qué base de datos usa Primitivo Suite?", [nexus]) == []
+    assert filter_by_names("¿qué base de datos usa la memoria de NEXUS?", [nexus]) == [nexus]
+    assert filter_by_names("¿cómo se despliega el servicio?", [nexus]) == [nexus]  # sin nombres: no filtra
+
+
+def test_chat_question_about_other_entity_abstains(api):
+    """Regresión real: "¿qué base de datos usa Primitivo Suite?" se respondía con fragmentos de NEXUS."""
+    model = RagModel()
+    c = api(model)
+    c.post("/api/v1/knowledge/documents", headers=AUTH, json={"title": "Atlas", "text": DOC})
+    tid = c.post("/api/v1/chat/messages", headers=AUTH,
+                 json={"message": "según mis documentos, ¿qué base de datos usa Primitivo Suite?"}).json()["task_id"]
+    t = c.get(f"/api/v1/tasks/{tid}", headers=AUTH).json()
+    assert t["status"] == "needs_input" and model.calls == []

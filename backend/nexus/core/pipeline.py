@@ -141,7 +141,8 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
         if label == "knowledge_query":  # Context Builder + RAG (Doc 02 §5, Doc 03 §8)
             with engine.connect() as c:
                 owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
-                hits = knowledge_store.search(c, owner, strip_routing(message), embedder, k=RAG_K)
+                query = strip_routing(message)
+                hits = knowledge_store.filter_by_names(query, knowledge_store.search(c, owner, query, embedder, k=RAG_K))
             if not hits:
                 # Abstención en código, no en el prompt: medido que el LLM ignora "no inventes"
                 # y responde de memoria a "según mis documentos…" (Doc 02 §2.9, Doc 03 §8.4).

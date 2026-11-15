@@ -8,20 +8,23 @@
 
 **Stack actual:** Python 3.11 (venv `backend/.venv` con uv) · pydantic 2.13 · SQLAlchemy 2.1 · Alembic 1.20 · psycopg 3.3 · FastAPI 0.163 · uvicorn 0.54 · httpx 0.28 · pytest 8 · Docker Compose (pgvector/pgvector:pg16) · git → GitHub `yonaurif/Nexus`.
 
-**Hardware real (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). CUDA 13.3 + VS 2022 Build Tools. `llama-cpp-python` 0.3.37 **compilado con CUDA** en el venv (`sm_86`, 66 min), `gpu_offload True`. Modelos GGUF en `C:\Worker Primitivo\models` (Qwen2.5-7B, Qwen3-4B, Hermes-3-8B, Yi-1.5-9B, gemma-2-9b, todos Q4_K_M).
+> **Equipo de desarrollo ≠ equipo de producción (D19).** Este PC se usa para desarrollar NEXUS y su IA en Python; NEXUS se ejecutará en **otro equipo**. Nada del diseño se dimensiona con este hardware: modelo, capas en GPU, rutas, Tesseract, raíces de carpetas y límites se configuran por `.env` en cada equipo. Los números medidos aquí sirven solo como referencia de desarrollo.
+
+**Equipo de desarrollo (medido 2026-11-15):** NVIDIA RTX 3050 **8 GB VRAM** · AMD Ryzen 5 5600G 6C/12T · **23,4 GB RAM visibles** (los docs decían 32 GB: revisar). CUDA 13.3 + VS 2022 Build Tools. `llama-cpp-python` 0.3.37 **compilado con CUDA** en el venv (`sm_86`, 66 min), `gpu_offload True`. Modelos GGUF en `C:\Worker Primitivo\models` (Qwen2.5-7B, Qwen3-4B, Hermes-3-8B, Yi-1.5-9B, gemma-2-9b, todos Q4_K_M).
 
 **Arranque local:**
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 94 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 111 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000
 # Modelo (en .env o entorno; sin servicios externos):
 #   NEXUS_GGUF_PATH=C:/Worker Primitivo/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf   (activo; NEXUS_GGUF_CTX=4096, NEXUS_GGUF_GPU_LAYERS=-1)
 #   NEXUS_EMBED_MODEL_DIR=<snapshot HF de paraphrase-multilingual-MiniLM-L12-v2>  (activo; ONNX, pip install -e ".[embeddings]")
 #   OCR: Tesseract en C:\Program Files\Tesseract-OCR (auto) + backend/tessdata (spa/eng/osd, copiado de Primitivo, no se sube)
+#   carpetas: NEXUS_FOLDER_ROOTS=C:/ruta1;C:/ruta2  (raíces autorizadas; sin esto no se puede registrar ninguna)
 #   reindexar vectores tras cambiar de embedder: .venv/Scripts/python.exe -m nexus.knowledge.reindex
-#   reinstalar con CUDA: CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
+#   reinstalar con CUDA (en ESTE equipo; en otro, su arquitectura o sin -DCMAKE_CUDA_ARCHITECTURES): CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" CMAKE_GENERATOR="Visual Studio 17 2022" uv pip install -e ".[gguf]"
 #   NEXUS_MODEL=paquete.modulo:Clase    (tu propia IA en Python; tiene prioridad)
 ```
 
@@ -100,7 +103,11 @@ Dependencias (README): **02 → 03 + 05**; **03 → Core/agentes**; **05 → fro
      embeddings.OnnxEmbedder (MiniLM multilingüe, 384 d, CPU, sin torch)
   nexus/memory/episodes.py  record / search (append-only)                                      ✅ (M1)
      extract.extract (PDF/DOCX/XLSX/CSV/HTML/JSON/imagen + OCR Tesseract; portado de Primitivo-f25)   ✅
-     API: POST /api/v1/knowledge/documents · POST /api/v1/knowledge/files (multipart) · GET /api/v1/knowledge/search · GET /api/v1/memory/episodes
+     sources.register_folder / sync_folder / due_sources (carpetas incrementales; portado de f25)  ✅
+       hilo nexus-sync (cada 60 s) → due_sources → sync_folder(trigger=schedule)
+       tablas: source_files (manifiesto), sync_runs (pasadas) · documents.uri_ref (0004)
+     API: POST/GET /api/v1/knowledge/sources · POST …/sources/{id}/sync[?force] · GET …/sources/{id}/runs
+          POST /api/v1/knowledge/documents · POST /api/v1/knowledge/files (multipart) · GET /api/v1/knowledge/search · GET /api/v1/memory/episodes
 ```
 
 **Conexiones reales en código hoy:**
@@ -180,7 +187,7 @@ Pendiente de M0 que se difiere: `plans`/`plan_steps`/`tool_executions` tienen ta
 
 Diferido: tabla `model_invocations` (Doc 02 §13) → con el primer modelo real; presupuesto de contexto por tokens → cuando haya tokenizador del modelo elegido.
 
-**Modelo activo (D6):** Qwen2.5-7B-Instruct Q4_K_M en GPU: carga 7 s, respuesta corta ~1,6 s. Probado por la API: chat, petición no disponible (GitHub → `partial`) y "¿qué hora es?" → Planner propone `system.time.now` → `completed` con fuente `internal:system_clock`. El prompt de sistema lista las herramientas reales del registro para que el modelo no prometa capacidades inexistentes.
+**Modelo usado en desarrollo (D6, no es una decisión de producción):** Qwen2.5-7B-Instruct Q4_K_M en GPU: carga 7 s, respuesta corta ~1,6 s. Probado por la API: chat, petición no disponible (GitHub → `partial`) y "¿qué hora es?" → Planner propone `system.time.now` → `completed` con fuente `internal:system_clock`. El prompt de sistema lista las herramientas reales del registro para que el modelo no prometa capacidades inexistentes.
 
 ### ✅ C2 — Planner/Executor/Verifier (HECHO) (Doc 02 §6–8, §11)
 
@@ -224,7 +231,21 @@ Medido para calibrar: distancia coseno MiniLM — relevantes 0,32–0,60, irrele
 - [x] `backend/tests/test_extract.py` — 16 tests (13 portados/adaptados de Primitivo + OCR real con Tesseract sobre PDF escaneado + subida); `test_reembed_missing…` en test_m1m2.
 - [x] Prueba real: `.docx` de NEXUS (20 chunks, 2,2 s) y acta escaneada (OCR, 1,1 s); Qwen responde "4.750 euros" y "NAS de la oficina" desde la imagen.
 
-Diferido: grafo semántico (M3), procedimientos (M4), consolidación/olvido/expiración (M5), sincronización de carpetas (§4b prioridad 2), índice HNSW por perfil (>100k chunks), ingesta en cola, PII con NER, chunking por tokens, `.doc`/`.pptx`.
+**Carpetas sincronizadas (portado de Primitivo-f25 `kb_service`/`kb_scheduler`, prioridad 2 de §4b): ✅ HECHO**
+- [x] `backend/migrations/versions/0004_folder_sources.py` — `source_files`, `sync_runs`, `documents.uri_ref`; dedupe solo entre documentos activos (índice único parcial); downgrade probado ida y vuelta.
+- [x] `backend/nexus/knowledge/sources.py` — de Primitivo: señal (mtime,size) ±1 s, manifiesto, contadores por pasada, un fallo no corta, retirada de borrados. Añadido para NEXUS:
+  - raíces autorizadas `NEXUS_FOLDER_ROOTS` (también se revalida en cada pasada), sin seguir enlaces simbólicos, sin `.git/node_modules/.venv/...` ni temporales `~$`;
+  - **archivos con nombre de secreto** (`credenciales*`, `*password*`, `.env`, `id_rsa`, `.pem`, `.kdbx`…) → `skipped: SENSITIVE_FILENAME`, nunca se leen (hallado en `Primitivo proyecto/Docs`, que tiene `credenciales_*.txt`);
+  - modificado → versión anterior `superseded`; borrado → `deleted`; en ambos casos chunks y vectores borrados (Doc 03 §12);
+  - una carpeta = una fuente (409 si se registra dos veces); una pasada a la vez (advisory lock → `busy`);
+  - `force=true` regenera chunks de documentos sin cambios (`ingest_document(refresh=True)`).
+- [x] Chunking: cada fragmento lleva la **ruta de títulos** ("Primitivo Worker › Estructura") y se descartan fragmentos que son solo un título. Medido: sin ruta, la sección con el puerto no se recuperaba.
+- [x] `store.filter_by_names`: si la pregunta nombra entidades, solo cuentan fragmentos que las mencionan. Medido: "¿qué BD usa Primitivo Suite?" respondía "PostgreSQL" con fragmentos de NEXUS.
+- [x] Planificador: hilo `nexus-sync` (solo en el servidor real), `interval_minutes` 5–10080 o manual.
+- [x] Tests: `test_sync.py` (15) + 4 nuevos en `test_m1m2.py`.
+- [x] Prueba real: carpeta con README/CHANGELOG de Primitivo + archivo de credenciales señuelo → 2 indexados, 1 omitido por nombre; modificación (puerto 8600→9700) y borrado detectados; Qwen responde "9700" y se abstiene sobre Primitivo Suite.
+
+Diferido: grafo semántico (M3), procedimientos (M4), consolidación/olvido/expiración (M5), detección por hash (hoy mtime+size), rutas de red SMB, API para dar de baja una fuente, índice HNSW por perfil (>100k chunks), ingesta en cola, PII con NER, chunking por tokens, `.doc`/`.pptx`.
 
 ### ⬜ T0/T1 — Text Learning (doc TL §12)
 
@@ -235,6 +256,23 @@ Diferido: grafo semántico (M3), procedimientos (M4), consolidación/olvido/expi
 
 Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobaciones (C5).
 
+## 4a. Despliegue en el equipo de producción (D19)
+
+Qué necesita el equipo destino (todo opcional salvo lo marcado):
+
+| Pieza | Obligatorio | Cómo se configura | Si falta |
+|---|---|---|---|
+| Python 3.11+ y `backend/` con `pip install -e .` | Sí | — | — |
+| PostgreSQL 16 + pgvector (`docker compose up -d db` o servidor propio) | Sí | `NEXUS_DATABASE_URL` o `NEXUS_DB_PASSWORD` | No arranca |
+| `NEXUS_API_TOKEN` | Sí | `.env` | No arranca |
+| Modelo GGUF + `.[gguf]` (CPU o GPU según el equipo) | No | `NEXUS_GGUF_PATH`, `NEXUS_GGUF_CTX`, `NEXUS_GGUF_GPU_LAYERS` | `StubModel` (tareas `partial`) |
+| IA propia en Python | No | `NEXUS_MODEL=modulo:Clase` | — |
+| Embeddings ONNX + `.[embeddings]` | No | `NEXUS_EMBED_MODEL_DIR` | RAG solo full-text |
+| Tesseract + `tessdata` (spa/eng) + `.[documents]` | No | `NEXUS_TESSERACT_CMD`, `NEXUS_TESSDATA_DIR`, `NEXUS_OCR_LANGUAGES` | Sin OCR (PDF con texto sí) |
+| Carpetas a sincronizar | No | `NEXUS_FOLDER_ROOTS` | No se pueden registrar carpetas |
+
+Pendiente para producción: elegir modelo según el hardware destino (las piezas 4 de §4b —`hardware.py`, `auto_gpu_layers`, catálogo de compatibilidad del Worker— sirven justo para eso), empaquetado/servicio de arranque y backups.
+
 ## 4b. Reutilización desde Primitivo y Primitivo Worker
 
 Fuente: `C:\Users\YonaPc\Documents\GitHub\Primitivo proyecto`. Versiones revisadas: `Primitivo` (rama `main`, 16-10), `Primitivo-f25` (rama `f25-kb-equipo`, 18-10, la más reciente: KB desde el equipo + optimizaciones de OCR/vectores) y `Primitivo_Worker` (`main`, 10-10). `Primitivo-base` es una copia anterior y se ignora.
@@ -244,7 +282,7 @@ Fuente: `C:\Users\YonaPc\Documents\GitHub\Primitivo proyecto`. Versiones revisad
 | Prioridad | Necesidad NEXUS (doc · fase) | Origen en Primitivo | Qué se adapta | Tests a portar |
 |---|---|---|---|---|
 | 1 ✅ | Ingesta de PDF/DOCX/XLSX/CSV/HTML/JSON/imágenes con **OCR** (Doc 03 §4–5 · M2) — **portado** | `Primitivo-f25/backend/app/gala/document_extractor.py` (PyMuPDF + Tesseract, OCR de páginas escaneadas y de imágenes incrustadas en PDF/DOCX; f25 lo hace en gris y 1 hilo) | Config por `env()` en vez de `settings`; **errores separados del texto** (hoy el mensaje de error se indexaría como contenido); HTML sin `<script>/<style>`; salida → `ingest_document()` (redacción de secretos ya incluida). Tesseract ya instalado en `C:\Program Files\Tesseract-OCR`; `tessdata` (spa/eng/osd) en `Primitivo/backend/tessdata`. Endpoint `POST /api/v1/knowledge/files` (multipart, límite de tamaño, tipos permitidos) | `test_document_extractor.py` |
-| 2 | Sincronización incremental de carpetas como fuente (Doc 03 §5 Source Registry, `sync_policy` · M5) | `gala/kb_service.py` (recorrido + manifiesto por `mtime,size`, reindexado incremental, borrado de huérfanos) + `gala/kb_scheduler.py` (APScheduler cron) | Manifiesto en `source_versions`/`documents` de NEXUS; rutas solo dentro de raíces autorizadas (Doc 02 §16); sin la parte SMB/UNC hasta que haga falta | `test_kb_device_sync.py` (f25) |
+| 2 ✅ | Sincronización incremental de carpetas como fuente (Doc 03 §5 Source Registry, `sync_policy` · M5) — **portado** | `gala/kb_service.py` (recorrido + manifiesto por `mtime,size`, reindexado incremental, borrado de huérfanos) + `gala/kb_scheduler.py` (APScheduler cron) | Manifiesto en `source_versions`/`documents` de NEXUS; rutas solo dentro de raíces autorizadas (Doc 02 §16); sin la parte SMB/UNC hasta que haga falta | `test_kb_device_sync.py` (f25) |
 | 3 | Adaptador REST seguro: allowlist, **anti-SSRF**, redirecciones, límite de tamaño (Doc 05 §7 · G1) | `websearch/service.py` (`_is_safe_url`, `_is_unsafe_ip`, `_fetch_page_html`: valida IP resuelta y cada redirección) | Módulo `nexus/gateway/http_safe.py` usado por todos los adaptadores REST; además herramienta `web.search` (DuckDuckGo/Tavily) **aislada sin acceso a DB**, como en Primitivo, resultados como datos no confiables | `test_websearch.py`, `Worker/tests/test_ssrf.py` |
 | 4 | Router de modelos con conciencia de hardware (Doc 02 §10, Doc 04 §12 métricas reales) | Worker `hardware.py` (psutil + nvidia-smi), `engine_llamacpp.py::auto_gpu_layers/resolve_gpu_layers` (capas en GPU según VRAM libre, margen 0,92), `model_catalog.py` (catálogo + compatibilidad RAM/VRAM), Primitivo `gala/model_fallback.py` (cadena de modelos de respaldo) | `NEXUS_GGUF_GPU_LAYERS=auto`; `/system/health` con CPU/RAM/GPU/VRAM reales; fallback entre tus GGUF de `C:\Worker Primitivo\models` si uno falla al cargar | `test_hardware.py`, `test_engine_llamacpp.py`, `test_model_catalog.py`, `test_gala_model_fallback.py` |
 | 5 | Cola con contrapresión para el modelo (Doc 02 §11 límites) | Worker `queue_control.py::RequestQueue` (FIFO, concurrencia 1, 503 si se llena) | Sustituye el `threading.Lock` de `LlamaCppModel`; estado de cola en health | `test_queue_control.py`, `test_request_queue.py` |
@@ -271,10 +309,13 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D9 | SQL explícito con `sa.text` (SQLAlchemy Core), sin ORM; migraciones Alembic en SQL plano | Adoptada | ponytail / Doc 03 §7 |
 | D10 | Append-only forzado por trigger en Postgres | Adoptada | Doc 03 §3.1 |
 | D5 | Validación de input solo `required` hasta G1 | Temporal | ponytail |
-| D6 | LLM: Qwen2.5-7B-Instruct Q4_K_M (GGUF, GPU). Embeddings: **pendiente** (M2) | LLM adoptado; benchmark comparativo pendiente | Doc 02 §10, Doc 03 §8.1 |
+| D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D17 | Carpetas: solo bajo `NEXUS_FOLDER_ROOTS`; archivos con nombre de secreto nunca se leen; planificador en hilo propio (no APScheduler) | Adoptada | Doc 02 §16, Doc 04 §11 |
+| D18 | Fragmentos con ruta de títulos + filtro por entidades nombradas en RAG | Adoptada (heurística hasta M3) | medido con datos reales |
 | D16 | Sin evidencia en `knowledge_query` → abstención en código (no se llama al LLM) | Adoptada (medido: el LLM ignora "no inventes") | Doc 02 §2.9 |
+| D19 | **El equipo de desarrollo no dimensiona NEXUS.** Todo lo dependiente del equipo (modelo, GPU/capas, rutas, Tesseract, `NEXUS_FOLDER_ROOTS`, límites) va por `.env`; el código detecta lo disponible y degrada sin fallar (sin GPU → CPU, sin embedder → solo full-text, sin Tesseract → sin OCR, sin modelo → Stub) | Adoptada (decisión del propietario) | despliegue en otro equipo |
 | D13 | Runtime de modelos **en proceso**: GGUF vía llama-cpp-python o clase Python propia; **no Ollama** ni servidores externos | Adoptada (decisión del propietario) | Doc 02 §10 |
 | D7 | SSE para estados de tarea (servidor → cliente), con id de `execution_events` | Adoptada (C1) | Doc 04 §9.2 |
 | D11 | Auth inicial: un token Bearer por instancia (`NEXUS_API_TOKEN`), un único propietario | Temporal hasta Fase 4 | Doc 04 §11 |
@@ -296,3 +337,4 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | M1/M2: episodios, ingesta con redacción de secretos, chunking, embeddings ONNX, búsqueda híbrida, RAG en el Core con abstención | `pytest` 77 passed; 7 docs de NEXUS ingeridos y consultados con Qwen |
 | 2026-11-15 | Revisión de Primitivo / Primitivo Worker: mapa de reutilización (§4b), 12 piezas priorizadas con sus tests | — |
 | 2026-11-15 | Portado de Primitivo-f25: extractor de documentos con OCR + `POST /knowledge/files`; embedder a 128 tokens con reindexado gradual | `pytest` 94 passed; docx real + PDF escaneado subidos y consultados con Qwen |
+| 2026-11-15 | Portado de Primitivo-f25: carpetas sincronizadas (manifiesto, pasadas, planificador) con raíces autorizadas y exclusión de archivos de credenciales; ruta de títulos en chunks; filtro por entidades | `pytest` 111 passed; carpeta real: cambios y borrados detectados, Qwen responde "9700" y se abstiene sobre Primitivo Suite |

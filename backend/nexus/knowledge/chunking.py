@@ -33,12 +33,15 @@ def _hard_split(text: str, start: int, end: int, max_chars: int):
 
 
 def chunk_text(text: str, max_chars: int = 1200) -> list[Chunk]:
+    """`heading` es la ruta de títulos ("Doc › Sección › Sub"): sin ella, un fragmento de
+    "Estructura" no sabe que pertenece a "Primitivo Worker" y la búsqueda no lo encuentra (medido)."""
     spans: list[tuple[int, int, str | None]] = []
-    heading, cur = None, None  # cur = [start, end]
+    heading, cur = None, None  # cur = [start, end, tiene_cuerpo]
+    path: list[tuple[int, str]] = []  # (nivel, título)
 
     def flush():
         nonlocal cur
-        if cur:
+        if cur and cur[2]:  # un título sin cuerpo ya va en la ruta de los fragmentos siguientes
             spans.append((cur[0], cur[1], heading))
         cur = None
 
@@ -47,15 +50,19 @@ def chunk_text(text: str, max_chars: int = 1200) -> list[Chunk]:
         e = s + len(text[s:e].rstrip())
         if s == e:
             continue
-        if h := HEADING.match(text[s:e].splitlines()[0]):
+        is_heading = bool(h := HEADING.match(text[s:e].splitlines()[0]))
+        if is_heading:
             flush()
-            heading = h.group(1)
+            level = len(text[s:e]) - len(text[s:e].lstrip("#"))
+            path = [p for p in path if p[0] < level] + [(level, h.group(1))]
+            heading = " › ".join(t for _, t in path)
         if e - s > max_chars:
             flush()
             spans.extend((a, b, heading) for a, b in _hard_split(text, s, e, max_chars))
             continue
         if cur and e - cur[0] > max_chars:
             flush()
-        cur = [cur[0] if cur else s, e]
+        body = not is_heading or len(text[s:e].splitlines()) > 1
+        cur = [cur[0], e, cur[2] or body] if cur else [s, e, body]
     flush()
     return [Chunk(i, text[a:b], a, b, h) for i, (a, b, h) in enumerate(spans)]

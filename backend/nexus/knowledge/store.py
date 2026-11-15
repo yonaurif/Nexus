@@ -5,6 +5,7 @@ Búsqueda: filtro por propietario/estado ANTES del ranking -> full-text (OR de t
 vectorial (mismo perfil) -> Reciprocal Rank Fusion -> máximo N chunks por documento.
 """
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -48,6 +49,21 @@ class Hit:
         return f"doc:{self.document_id}#{self.chunk_index}"
 
 
+_WORD = re.compile(r"[^\W\d_][\w-]*")
+
+
+def filter_by_names(query: str, hits: list[Hit]) -> list[Hit]:
+    """Si la pregunta nombra entidades (palabras con mayúscula que no abren la frase, o siglas),
+    solo valen los fragmentos que mencionan alguna. Medido: "¿qué base de datos usa Primitivo
+    Suite?" recuperaba fragmentos de NEXUS sobre PostgreSQL y el LLM los atribuía a Primitivo.
+    ponytail: heurística de mayúsculas; sustituir por extracción de entidades (M3/T0)."""
+    words = _WORD.findall(query)
+    names = {w.lower() for i, w in enumerate(words) if (i > 0 and w[0].isupper()) or (len(w) > 1 and w.isupper())}
+    if not names:
+        return hits
+    return [h for h in hits if any(n in f"{h.title} {h.heading or ''} {h.text}".lower() for n in names)]
+
+
 def _vec(v: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
@@ -64,41 +80,52 @@ def ensure_profile(conn, embedder) -> int:
 
 def ingest_document(engine, owner_id: str, *, title: str, text: str, embedder, uri_ref: str | None = None,
                     mime_type: str = "text/plain", source_type: str = "manual_upload",
-                    max_chars: int = 1200) -> IngestResult:
+                    max_chars: int = 1200, source_id: str | None = None, refresh: bool = False) -> IngestResult:
+    """`source_id`: fuente existente (p. ej. una carpeta sincronizada); si no, se crea una propia.
+    `refresh`: si el contenido ya existe, regenera sus chunks y vectores (cambió el chunking/OCR)."""
     clean, found = redact(text)
     content_hash = "sha256:" + hashlib.sha256(clean.encode()).hexdigest()
     with engine.begin() as c:
-        existing = c.scalar(sa.text("SELECT id FROM documents WHERE owner_id=:o AND content_hash=:h"),
-                            {"o": owner_id, "h": content_hash})
+        existing = c.scalar(sa.text("SELECT id FROM documents WHERE owner_id=:o AND content_hash=:h "
+                                    "AND status='active'"), {"o": owner_id, "h": content_hash})
+        if existing and refresh:
+            c.execute(sa.text("DELETE FROM document_chunks WHERE document_id=:d"), {"d": existing})
+            n = _insert_chunks(c, existing, clean, embedder, max_chars)
+            return IngestResult(existing, n, True, found)
         if existing:
             n = c.scalar(sa.text("SELECT count(*) FROM document_chunks WHERE document_id=:d"), {"d": existing})
             return IngestResult(existing, n, True, found)
 
-        source_id = c.scalar(sa.text(
-            "INSERT INTO memory_sources (owner_id, source_type, display_name, uri_ref, permission_scope, "
-            "status) VALUES (:o, :t, :n, :u, 'owner', 'active') RETURNING id"),
-            {"o": owner_id, "t": source_type, "n": title, "u": uri_ref})
+        if source_id is None:
+            source_id = c.scalar(sa.text(
+                "INSERT INTO memory_sources (owner_id, source_type, display_name, uri_ref, permission_scope, "
+                "status) VALUES (:o, :t, :n, :u, 'owner', 'active') RETURNING id"),
+                {"o": owner_id, "t": source_type, "n": title, "u": uri_ref})
         doc_id = f"doc_{uuid.uuid4().hex}"
         c.execute(sa.text(
             "INSERT INTO documents (id, owner_id, source_id, title, mime_type, sensitivity, content_hash, "
-            "char_count) VALUES (:i, :o, :s, :t, :m, :sens, :h, :n)"),
-            {"i": doc_id, "o": owner_id, "s": source_id, "t": title, "m": mime_type,
+            "char_count, uri_ref) VALUES (:i, :o, :s, :t, :m, :sens, :h, :n, :u)"),
+            {"i": doc_id, "o": owner_id, "s": source_id, "t": title, "m": mime_type, "u": uri_ref,
              "sens": "redacted" if found else "normal", "h": content_hash, "n": len(clean)})
 
-        chunks = chunk_text(clean, max_chars=max_chars)
-        ids = [c.scalar(sa.text(
-            "INSERT INTO document_chunks (document_id, chunk_index, heading, text, char_start, char_end) "
-            "VALUES (:d, :i, :h, :t, :s, :e) RETURNING id"),
-            {"d": doc_id, "i": ch.index, "h": ch.heading, "t": ch.text, "s": ch.start, "e": ch.end})
-            for ch in chunks]
+        n = _insert_chunks(c, doc_id, clean, embedder, max_chars)
+    return IngestResult(doc_id, n, False, found)
 
-        if embedder is not None and chunks:
-            profile = ensure_profile(c, embedder)
-            vectors = embedder.embed([f"{ch.heading or ''}\n{ch.text}".strip() for ch in chunks])
-            for cid, v in zip(ids, vectors):
-                c.execute(sa.text("INSERT INTO chunk_embeddings (chunk_id, profile_id, embedding) "
-                                  "VALUES (:c, :p, CAST(:v AS vector))"), {"c": cid, "p": profile, "v": _vec(v)})
-    return IngestResult(doc_id, len(chunks), False, found)
+
+def _insert_chunks(c, doc_id: str, clean: str, embedder, max_chars: int) -> int:
+    chunks = chunk_text(clean, max_chars=max_chars)
+    ids = [c.scalar(sa.text(
+        "INSERT INTO document_chunks (document_id, chunk_index, heading, text, char_start, char_end) "
+        "VALUES (:d, :i, :h, :t, :s, :e) RETURNING id"),
+        {"d": doc_id, "i": ch.index, "h": ch.heading, "t": ch.text, "s": ch.start, "e": ch.end})
+        for ch in chunks]
+    if embedder is not None and chunks:
+        profile = ensure_profile(c, embedder)
+        vectors = embedder.embed([f"{ch.heading or ''}\n{ch.text}".strip() for ch in chunks])
+        for cid, v in zip(ids, vectors):
+            c.execute(sa.text("INSERT INTO chunk_embeddings (chunk_id, profile_id, embedding) "
+                              "VALUES (:c, :p, CAST(:v AS vector))"), {"c": cid, "p": profile, "v": _vec(v)})
+    return len(chunks)
 
 
 def reembed_missing(engine, embedder, batch: int = 64) -> int:
@@ -155,7 +182,8 @@ def search(conn, owner_id: str, query: str, embedder, k: int = 5) -> list[Hit]:
         return []
     rows = {r.id: r for r in conn.execute(sa.text(
         "SELECT c.id, c.document_id, c.chunk_index, c.heading, c.text, c.char_start, c.char_end, "
-        "d.title, s.uri_ref FROM document_chunks c JOIN documents d ON d.id = c.document_id "
+        "d.title, coalesce(d.uri_ref, s.uri_ref) AS uri_ref FROM document_chunks c "
+        "JOIN documents d ON d.id = c.document_id "
         "JOIN memory_sources s ON s.id = d.source_id WHERE c.id = ANY(:ids) AND d.owner_id = :o"),
         {"ids": list(scores), "o": owner_id})}
 
