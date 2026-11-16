@@ -16,7 +16,7 @@
 ```bash
 docker compose up -d db          # .env en la raíz: NEXUS_DB_PASSWORD, NEXUS_API_TOKEN (no se suben)
 cd backend && .venv/Scripts/alembic.exe upgrade head
-.venv/Scripts/python.exe -m pytest -q                              # 232 passed (usa la DB nexus_test, nunca la de desarrollo)
+.venv/Scripts/python.exe -m pytest -q                              # 247 passed (usa la DB nexus_test, nunca la de desarrollo)
 .venv/Scripts/uvicorn.exe nexus.api.app:app --host 127.0.0.1 --port 8000   # API + interfaz en http://127.0.0.1:8000
 cd ../frontend && npm install && npm run build   # genera frontend/dist, que sirve el backend (o `npm run dev` en :5173 con proxy)
 # Modelo (en .env o entorno; sin servicios externos):
@@ -362,6 +362,15 @@ Lectura honesta: el test y el entrenamiento los escribió el mismo autor (sinté
 - [ ] Hallazgo pendiente: «recuerda que la contraseña del router es …» lo clasificó el modelo activo como `task_request` (no se guardó nada, respuesta fija). Corregirlo desde el chat y reentrenar; valorar comprobar credenciales antes de clasificar.
 - [ ] Siguiente en memoria: identidad/onboarding (nombre de la IA y del propietario en tablas propias, Doc 03 §3.5), olvido (M5) y consolidación desde episodios.
 
+### ✅ Paso 1 de §4c — Identidad, comandos `/` y modo «solo mis fuentes» (HECHO) (Doc 03 §3.5; Base MVP 4; GALA)
+
+- [x] Migración `0009`: tabla `identity` (nombre de la IA, nombre del propietario), **separada de la memoria** (Doc 03 §3.5): solo se cambia con `PUT /api/v1/identity` (propietario autenticado, auditado `identity.updated`); ningún mensaje del chat ni hecho la toca. Nombres de una línea (sin saltos: entran en el prompt de sistema).
+- [x] `nexus/core/identity.py`: `get/put/prompt` → el prompt de sistema empieza por «Te llamas X. El propietario se llama Y.» (por defecto NEXUS).
+- [x] `nexus/core/commands.py` + pipeline: `/resumir` (resume la conversación con el modelo, sin herramientas ni hechos; vacía → respuesta en código), `/fuentes <pregunta>` (fuerza `knowledge_query`: solo documentos + memoria confirmada, abstención si no hay), `/recuerda <dato>` (fuerza `memory_update`), `/ayuda` y comando desconocido → lista en código (`UNKNOWN_COMMAND`). El comando lo decide el propietario, no el clasificador; el modelo ve el texto, no el comando.
+- [x] UI: formulario «¿Cómo me llamo? / ¿Y tú?» en el chat vacío hasta configurarlo («cambiar nombres» después); saludo con el nombre del propietario; menú `/` con filtro (Tab/Enter completan); `/nueva` en la interfaz; botón **solo mis fuentes** = antepone `/fuentes` (un único mecanismo, visible en el historial).
+- [x] Tests: `test_identity_commands.py` (12). Navegador (instancia sin modelo en 8001): menú, Enter completa `/resumir`, `/fuentes hola` → abstención, comando desconocido → lista.
+- [ ] Pendiente: probar `/resumir` con Qwen; ocultar «corregir clase» en tareas lanzadas por comando (hoy se ofrece, sin efecto útil); modo «investigación web» de GALA espera a `web.search` (paso 4).
+
 ### ⬜ M4–M5, C3–C6, G3–G6, Fases 2–5 de interfaz
 
 Seguir el orden de cada documento; no empezar escritura externa (G5) sin aprobaciones (C5).
@@ -373,7 +382,7 @@ Hoy el clasificador ya reconoce `memory_update`, `rule_proposal` y `system_admin
 | Doc | Fase / criterio | Estado | Qué falta |
 |---|---|---|---|
 | 03 | **M3** semántica relacional | ✅ | Entidades, alias, hechos con evidencia, relaciones; `memory_update` («recuerda que…») → hecho **sugerido** hasta confirmar (crit. 5–6) |
-| Base | Onboarding e identidad (MVP 4) | ⬜ | Nombre de la IA y del propietario, preferencias; usarlos en el prompt (depende de M3) |
+| Base | Onboarding e identidad (MVP 4) | ✅ | Nombres en tabla propia, en el prompt; preferencias = hechos confirmados (M3) |
 | Base/02 | Motor de reglas (MVP 4) | ⬜ | `rule_proposal` → regla propuesta → aprobación → aplicada fuera de los pesos del modelo |
 | 03 | **M4** procedimientos y revisión | ⬜ | Procedimientos declarativos versionados, confirmar/corregir |
 | 03 | **M5** consolidación y olvido | ⬜ | Sugerencias de hechos, conflictos, expiración, **borrado completo** (doc, chunks, vectores, derivados; crit. 12), métricas |
@@ -441,6 +450,92 @@ Ideas sueltas de `rag/service.py` para M3 (entidades): `infer_entities`, `infer_
 
 Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbedder` (antes 256), con reindexado a perfil nuevo.
 
+## 4c. Capacidades de la IA de Primitivo (GALA) y su equivalente en NEXUS
+
+Fuente: `Primitivo-f25/backend/app/gala/` (router 2748 líneas, `actions.py`, `llm.py`, `kb_*`, `document_*`, `environment.py`, `sandbox_documents.py`, `source_router.py`, `db_context.py`, `model_fallback.py`), `agents/`, `websearch/`, `sandbox/` y el cliente (`lib/gala.js` comandos `/`, `GalaModeMenu`). Inventario 2026-11-16.
+Leyenda: ✅ NEXUS ya lo hace · 🟡 parcial · ⬜ falta · ⛔ no aplica a NEXUS (Primitivo es una suite multiusuario de empresa; NEXUS es personal).
+
+**Conversación**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| Chat con sesiones, historial y retomar conversación (`/sessions`, `/historial`, `/nueva`, `/limpiar`) | ✅ | C1 (episodios, conversaciones) |
+| Turno asíncrono (`/chat/turn` 202 + sondeo) y chip de latencia | ✅ | C2 + SSE; métricas por fase ⬜ (§4b prio 6) |
+| `/resumir` la conversación actual | ✅ | C3: resumen en código del episodio con el LLM (barato) |
+| Valoración 👍/👎 de cada respuesta (`/rating`) | ✅ | T5 (`feedback_events`, más rico: corrige la clase) |
+| Modos manuales: Normal / Citar fuentes internas / Investigación web | 🟡 | «solo mis fuentes» (`/fuentes`) hecho; falta modo web (paso 4) |
+| Router de fuente por LLM (`db_system`, `knowledge_base`, `web`, `model_knowledge`) con pregunta aclaratoria si duda | ✅ | Clasificador propio + reglas (T1/T3), abstención en código |
+| Contexto de datos del sistema (citas, backups, trabajos del usuario) inyectado en el prompt | 🟡 | NEXUS inyecta hechos confirmados (M3); faltan datos de calendario/tareas (G6) |
+| `redact_credentials` sobre todo el contexto; rechazo si se piden datos de otros usuarios | ✅ | `redact` + `SECRET_DETECTED`; multiusuario ⛔ |
+| Nombre (✅) y avatar (⬜) de la IA | 🟡 | Onboarding/identidad (nombre, avatar) |
+| Comandos `/` con ayuda (`/ayuda`) | ✅ | Interfaz: menú de comandos que mapea a clases/acciones |
+
+**Conocimiento (KB)**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| Subir documentos (PDF, DOCX, XLSX, imágenes) con OCR; adjuntos por conversación (`/subir`) | ✅ | M2 (`/knowledge/files`, extractor portado) |
+| `/analizar` el documento adjunto al último mensaje | 🟡 | Se indexa y se pregunta; falta «analiza ESTE adjunto» acotado a un solo documento |
+| Varias bases de conocimiento con carpetas del NAS/equipo, sincronización y planificador | ✅ | Carpetas sincronizadas (una base; raíces autorizadas) |
+| Ver documentos, fragmentos, estadísticas y ejecuciones de indexado | 🟡 | API de fuentes/pasadas; falta vista de fragmentos y estadísticas en UI |
+| Resumen de un documento (trabajo en segundo plano) | ⬜ | M2+: `knowledge_query` acotado a un doc |
+| Editar el texto de un documento indexado y reindexar | ⬜ | Bajo valor; YAGNI hasta que se pida |
+| Búsqueda por tipo/extensión/año (`doc-types`, `extensions`, `search_exact`, `count_by_metadata`) | ⬜ | M3/M5: filtros por metadatos |
+
+**Acciones con confirmación (`actions.py`: propuesta → tarjeta → ejecutar con re-chequeo)**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| Patrón propuesta/confirmación con permiso | ✅ | C5 (endurecido: hash, TTL, consumo único) |
+| Crear tarea pendiente (`tasks.create`) | 🟡 | `notes.create` interno; una tarea es una nota con estado → ampliar |
+| Crear evento de calendario (`/crear evento`, `/eventos`) | ⬜ | G6 calendario (readonly primero, luego G5 escritura) |
+| Programar / ejecutar backup (`/programar backup`, `/backup estado`) | ⬜ | Crit. 13 backups de NEXUS + tareas programadas |
+| Enviar mensaje a un canal de chat | ⛔ | Chat interno de empresa; equivalente futuro: correo (G6/G5) |
+| Buscar en Drive (`/drive buscar`) | 🟡 | Es la búsqueda en carpetas sincronizadas |
+
+**Generación de documentos**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| `/generar word`, `excel`, `pdf` desde instrucciones (plantilla determinista, sin ejecutar código) | ⬜ | §4b prio 8: herramienta `documents.generate` con aprobación |
+| `/generar presentacion` (.pptx) y `/generar grafico` (matplotlib) | ⬜ | Requiere ejecutar código (sandbox) o plantillas propias: ver prio 11 |
+| `/refinar` el último documento (edita el mismo archivo) | ⬜ | Tras `documents.generate` |
+| Entornos: lote de N documentos con datos variables; cifras calculadas en código, nunca por el LLM | ⬜ | Tras `documents.generate`; mismo principio que NEXUS (código decide) |
+| Listado y descarga de documentos generados | ⬜ | Con lo anterior |
+
+**Agentes, web y código**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| Agentes con nombre, instrucciones y herramientas (`kb_search`, `web_search`, `code_execution`, acciones) asignadas; el LLM sugiere herramientas; historial de ejecuciones (`/agente`) | ⬜ | C6 multiagente + Doc 04 Fase 2 Agent Manager |
+| Búsqueda web y lectura de páginas (DuckDuckGo) en módulo **sin acceso a la BD**, anti-SSRF, proxy de imágenes | 🟡 | `http_safe.py` portado (anti-SSRF); faltan `web.search`/`web.fetch` aislados |
+| Ejecución de Python en sandbox (timeout, sin red, dir temporal) | ⛔/⬜ | Bloqueado por Doc 02 §1.2 salvo aprobación explícita (§4b prio 11) |
+
+**Modelos**
+| GALA | NEXUS | Fase NEXUS / nota |
+|---|---|---|
+| Cadena de modelos de respaldo y estadísticas | ✅ | Router por hardware + `FallbackModel` |
+| Catálogo, descarga, activación y borrado de GGUF; info del NAS | ⬜ | Diferido (catálogo del Worker); hoy por `.env` |
+| Equipo asociado (Worker) remoto, prueba y log de rendimiento | ⛔ | D19: NEXUS corre entero en su equipo |
+| Proveedores Ollama/OpenRouter con consentimiento cloud | ⛔ | D13: sin servicios externos |
+
+**Lo que NEXUS tiene y GALA no:** memoria de hechos con evidencia y contradicciones (M3), IA de intención propia entrenada y promovida con métricas (T0–T5), abstención en código sin evidencia, auditoría de cada paso, aprobación con hash de argumentos, conector GitHub.
+
+#### Migración de GALA y agentes por bloques (decidido 2026-11-16: «portar todo, por bloques»)
+
+Regla: se porta la lógica con sus tests de GALA convertidos a NEXUS (PostgreSQL síncrono, contratos estrictos, aprobaciones C5, auditoría); fuera lo que NEXUS descarta por decisión (Ollama/OpenRouter/consentimiento cloud D13, Worker remoto D19, chat entre usuarios, licencias).
+
+| Bloque | Origen en Primitivo-f25 | Destino NEXUS | Estado |
+|---|---|---|---|
+| 0 | Frases de los tests aprobados de GALA | Dataset de intención (29, siempre a train) + **examen externo fijo** `eval_gala_v1.jsonl` (26) | ✅ |
+| 1 | `gala/document_generator.py` + `/refinar` | Herramienta `documents.generate` (Word/Excel/PDF) con aprobación + descarga | ⬜ |
+| 2 | `websearch/service.py` + modo web de `source_router` | `web.search`/`web.fetch` aislados (sin acceso a la BD) + modo «investigación web» | ⬜ |
+| 3 | `source_router.py` (conteos y «en qué documentos sale X» deterministas) | Respuestas en código sobre metadatos de documentos | ⬜ |
+| 4 | `agents/` (definición, herramientas asignadas, `capabilities_prompt`, ejecuciones) | C6 + Agent Manager (Doc 04 Fase 2) | ⬜ |
+| 5 | `gala/environment.py` (lotes de documentos, cifras en código) | Tras el bloque 1 | ⬜ |
+| 6 | `actions.py` tareas/backups programados | Tareas con estado + backups (crit. 13) | ⬜ |
+| — | `sandbox_documents.py` (pptx, gráficos con código) | Bloqueado por Doc 02 §1.2 salvo aprobación explícita | ⛔ |
+
+**Bloque 0 (hecho):** `source_type="project_tests"` (procedencia `primitivo-f25:backend/tests/<archivo>:<línea>`) va siempre a entrenamiento para no mover el test bloqueado; `intent.train(..., external=)` añade `external_eval` al informe (acierto híbrido/modelo/reglas y fallos), lo imprime la CLI y lo muestra la pestaña aprendizaje. Etiquetado: búsquedas web y agenda → `agent_request` (servicio externo), acciones → `task_request`, documentos/conteos → `knowledge_query`; descartados los textos de relleno («algo», «tema profundo») y los ambiguos. **Medido** en el examen GALA: modelo anterior `180f58a6594d` 65 % → nuevo `8084bbce0c60` **77 %** (reglas 27 %); test bloqueado híbrido 0,860. Falla aún: «¿qué tiempo hace en Tokio?», «¿quién ganó el Balón de Oro 2025?», «resume el mercado» (no hay ejemplos de web: llegan con el bloque 2) y vacaciones/ventas → conversación.
+**Hallazgo (corregido):** el modelo activo `mdl_25b7562b…` no cargaba (`ARTIFACT_HASH_MISMATCH`): el nombre del artefacto dependía solo de la versión del dataset y otro entrenamiento con los mismos datos lo sobrescribió, así que NEXUS clasificaba **solo con reglas** sin avisar. Ahora el nombre lleva el hash del contenido (escritura atómica) y la pestaña aprendizaje avisa si el activo no carga. El artefacto perdido no se recupera: hay que promover un candidato.
+
+**Propuesta de orden para cubrir GALA** (encaja con el orden recomendado de §4): 1) identidad + `/resumir` + selector de modo y comandos `/` (barato, visible) → 2) motor de reglas (`rule_proposal`) → 3) `documents.generate` Word/Excel/PDF + `/refinar` (prio 8) → 4) `web.search`/`web.fetch` aislados → 5) tareas/backups programados (crit. 13) → 6) agentes (C6) → 7) calendario/correo (G6).
+
 ## 5. Decisiones técnicas
 
 | # | Decisión | Estado | Origen |
@@ -455,6 +550,8 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | D6 | LLM de desarrollo: Qwen2.5-7B-Instruct Q4_K_M (GGUF). El de producción se elige según el equipo destino | Solo desarrollo; pendiente para producción | Doc 02 §10, Doc 03 §8.1 |
 | D14 | Tests en base de datos separada `nexus_test` (creada por `conftest.py`) | Adoptada | evita contaminar la DB real |
 | D15 | Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` en ONNX (ya estaba en la caché HF), en proceso y CPU | Adoptada; comparar con bge-m3/e5 cuando haya set de evaluación | Doc 03 §8.1 |
+| D29 | Migración de GALA por bloques; frases de sus tests: mitad entrenamiento (`project_tests`, siempre a train), mitad examen externo fijo nunca entrenado; artefactos con nombre por hash de contenido | Adoptada | §4c; TL §6.3 |
+| D28 | Identidad en tabla propia, cambiable solo por la API autenticada; comandos `/` resueltos en el servidor (fuerzan la ruta) y «solo mis fuentes» = prefijo `/fuentes` | Adoptada | Doc 03 §3.5; §4c |
 | D27 | M3: hechos `suggested` hasta confirmación del propietario; el LLM solo propone la estructura; sin tabla `relations` (el hecho con objeto-entidad es la arista); contradicciones resueltas por el propietario | Adoptada | Doc 03 §6.1, §7.3, §9.2 |
 | D26 | T3: clasificador = TF-IDF + embeddings del encoder del RAG (MiniLM congelado), sin torch; el artefacto exige el mismo encoder al cargar | Adoptada | TL §12 |
 | D25 | Aprendizaje continuo: la corrección del usuario nunca toca el modelo directamente; staging → revisión del propietario → reentrenamiento → candidato; feedback solo en entrenamiento; promoción bloqueada si regresa >0,02 | Adoptada | TL §8 |
@@ -500,3 +597,7 @@ Ajuste detectado gracias a f25 y **aplicado**: `max_seq_length` 128 en `OnnxEmbe
 | 2026-11-15 | T3: dataset 183 → 463, variante TF-IDF + encoder MiniLM, carga ligada al encoder, entrenamiento por API/CLI con el embedder del RAG | `pytest` 219 passed; candidato `+enc`: híbrido 0,871, acierto en lo aceptado 92 %, sondas 17/21 (activo 12/21), sin promover |
 | 2026-11-15 | Candidato T3 `mdl_25b7562b…` (`intent_es_v1+enc:180f58a6594d`) promovido a activo por el propietario (auditado); el anterior queda retirado | carga con el embedder MiniLM verificado; Helios, migración del NAS y "¿qué sabes del NAS?" → knowledge_query |
 | 2026-11-15 | M3: entidades, alias, hechos con evidencia y conflictos (migración 0008); `memory_update` → sugerencia; hechos confirmados como contexto y evidencia; pestaña memoria | `pytest` 232 passed; real con Qwen: NAS ubicado/gestionado confirmados y usados con fuente `fact:`, contradicción de horario detectada |
+| 2026-11-16 | Inventario de capacidades de GALA (IA de Primitivo) frente a NEXUS (§4c) y orden propuesto para cubrirlas | — |
+| 2026-11-16 | Paso 1 de §4c: identidad (migración 0009, `/identity`), comandos `/resumir` `/fuentes` `/recuerda` `/ayuda`, menú `/` y botón «solo mis fuentes» en la UI | `pytest` 244 passed; navegador con instancia sin modelo |
+| 2026-11-16 | Bloque 0 de la migración de GALA: frases de sus tests al dataset y examen externo; corregido artefacto sobrescrito (activo no cargaba); `CONFIGURACION.md` + `.env.example` | `pytest` 247 passed; examen GALA 65 % → 77 % (reglas 27 %), candidato `intent_es_v1+enc:8084bbce0c60` |
+| 2026-11-16 | Candidato `mdl_0eba3688…` (`intent_es_v1+enc:8084bbce0c60`, examen GALA 77 %) promovido a activo por el propietario (auditado); carga verificada | — |

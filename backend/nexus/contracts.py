@@ -114,6 +114,12 @@ class ApprovalDecision(Strict):
     decision: Literal["approve", "reject"]
 
 
+class IdentityIn(Strict):
+    # Entra en el prompt de sistema: una línea corta, sin saltos (no se cuela texto de instrucciones).
+    assistant_name: str = Field(min_length=1, max_length=40, pattern=r"^[^\r\n]+$")
+    owner_name: str = Field(min_length=1, max_length=60, pattern=r"^[^\r\n]+$")
+
+
 class FactReview(Strict):
     """Doc 03 §14 `facts/{id}/review`. replace=True: el hecho sustituye a los confirmados que contradice."""
     decision: Literal["confirm", "reject"]

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import sqlalchemy as sa
 
 from nexus.contracts import Evidence
-from nexus.core import approvals, planner, task_store
+from nexus.core import approvals, commands, identity, planner, task_store
 from nexus.knowledge import store as knowledge_store
 from nexus.memory import episodes, facts
 from nexus.core.classifier import classify, strip_routing
@@ -82,9 +82,11 @@ def _context(engine, conversation_id: str, exclude_task: str | None = None) -> l
             "AND (role = 'user' OR task_id IS DISTINCT FROM CAST(:x AS text)) "
             "ORDER BY id DESC LIMIT :n"), {"c": conversation_id, "n": HISTORY_LIMIT, "x": exclude_task}).all()
         tools = SqlToolRegistry(c).list_enabled()
+        owner = c.scalar(sa.text("SELECT owner_id FROM conversations WHERE id=:c"), {"c": conversation_id})
+        who = identity.prompt(c, owner)
     # Capacidades reales desde el registro: el modelo no debe prometer lo que NEXUS no puede hacer.
     caps = "; ".join(f"{t.tool_id}: {t.description}" for t in tools) or "ninguna"
-    system = (f"{SYSTEM_PROMPT}\nCapacidades actuales: conversar y estas herramientas: {caps}. "
+    system = (f"{who} {SYSTEM_PROMPT}\nCapacidades actuales: conversar y estas herramientas: {caps}. "
               "No afirmes tener otras capacidades (internet, correo, calendario, recordatorios, "
               "archivos...): si te piden algo así, di que aún no está disponible.")
     return [{"role": "system", "content": system}] + [
@@ -194,7 +196,13 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
     label = "unknown"
     try:
         _step(engine, task_id, S.classifying)
-        label = classify(message)
+        cmd, rest = commands.parse(message)
+        if cmd and cmd != "/resumir" and not (cmd in commands.ROUTES and rest):
+            _step(engine, task_id, S.needs_input)  # /ayuda, comando desconocido o sin texto: en código
+            _reply(engine, task_id, conversation_id, commands.HELP, [] if cmd == "/ayuda" else ["UNKNOWN_COMMAND"])
+            return
+        label = "conversation" if cmd == "/resumir" else commands.ROUTES[cmd] if cmd else classify(message)
+        message = rest if cmd else message
         with engine.begin() as c:  # T5: para poder corregirla después
             c.execute(sa.text("UPDATE tasks SET request_class=:l WHERE id=:t"), {"l": label, "t": task_id})
         if label == "unknown":
@@ -211,12 +219,19 @@ def run(engine, model, adapters, task_id, conversation_id, message, correlation_
             warnings.append("MODEL_NOT_CONFIGURED")
         if label in NOT_YET:
             warnings.append(f"CAPABILITY_UNAVAILABLE:{label} (fase {NOT_YET[label]})")
+        if cmd:  # el modelo ve el texto, no el comando
+            messages[-1] = {"role": "user", "content": commands.SUMMARY_NOTE if cmd == "/resumir" else message}
+        if cmd == "/resumir" and len(messages) <= 2:
+            _step(engine, task_id, S.planning)
+            _step(engine, task_id, S.needs_input)
+            _reply(engine, task_id, conversation_id, "No hay nada que resumir todavía en esta conversación.", warnings)
+            return
         if label == "memory_update":
             _remember(engine, model, task_id, conversation_id, message, warnings, correlation_id)
             return
         with engine.connect() as c:
             owner = c.scalar(sa.text("SELECT owner_id FROM tasks WHERE id=:t"), {"t": task_id})
-            known = facts.relevant(c, owner, message)
+            known = [] if cmd == "/resumir" else facts.relevant(c, owner, message)
         if known:
             messages = _with_facts(messages, known)
         # Un hecho confirmado sobre una entidad nombrada es evidencia (Doc 03 crit. 5); las preferencias del

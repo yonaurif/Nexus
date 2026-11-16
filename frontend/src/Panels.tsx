@@ -202,6 +202,9 @@ export function LearningPanel() {
       <h3>modelos de intención</h3>
       <button className="ghost" onClick={train}>Reentrenar con mis correcciones</button>
       {note && <p className="note" role="status">{note}</p>}
+      {models.data && !models.data.active_intent && models.data.models.some((m) => m.status === "active") && (
+        <p className="error" role="alert">El modelo activo no se puede cargar (archivo ausente o modificado): NEXUS está usando solo reglas. Promueve otro candidato.</p>
+      )}
       <ul className="tools">
         {models.data?.models.filter((m) => m.status !== "retired").map((m) => (
           <li key={m.id} className={`tool tool-${m.status === "active" ? "enabled" : "review"}`}>
@@ -209,6 +212,7 @@ export function LearningPanel() {
             <dl className="kv">
               <dt>híbrido</dt><dd>{f1(m.metrics.test.hybrid_macro_f1)} F1 · reglas {f1(m.metrics.test.baseline_rules_macro_f1)}</dd>
               <dt>validación</dt><dd>{m.metrics.cross_validation ? `${f1(m.metrics.cross_validation.macro_f1_mean)} ± ${f1(m.metrics.cross_validation.macro_f1_std)}` : "—"}</dd>
+              {m.metrics.external_eval && <><dt>examen GALA</dt><dd>{Math.round(m.metrics.external_eval.hybrid_accuracy * 100)} % de {m.metrics.external_eval.examples} frases nunca vistas · reglas {Math.round(m.metrics.external_eval.rules_accuracy * 100)} %</dd></>}
               <dt>datos</dt><dd>{m.metrics.dataset.examples} ejemplos · {m.metrics.dataset.feedback_examples ?? 0} tuyos</dd>
             </dl>
             {m.status === "candidate" && <div className="row"><button onClick={() => promote(m)}>Promover</button></div>}

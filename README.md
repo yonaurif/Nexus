@@ -1,4 +1,8 @@
-# NEXUS AI — Paquete de especificaciones 02, 03 y 05
+# NEXUS AI
+
+**Instalar, configurar y arrancar:** [CONFIGURACION.md](CONFIGURACION.md) · estado y decisiones: [plan.md](plan.md)
+
+## Paquete de especificaciones 02, 03 y 05
 
 Fecha: 15 de noviembre de 2026
 

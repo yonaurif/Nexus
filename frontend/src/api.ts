@@ -83,6 +83,8 @@ export type Feedback = {
   feedback_id: string; task_id: string; text: string; predicted_label: string | null; corrected_label: string;
   status: string; created_at: string;
 };
+export type Identity = { assistant_name: string; owner_name: string | null; configured: boolean };
+
 export type Fact = {
   fact_id: string; subject: string; predicate: string; object: string;
   status: "suggested" | "confirmed" | "rejected" | "superseded" | "expired" | "deleted";
@@ -92,7 +94,8 @@ export type ModelEntry = {
   id: string; version: string; status: "candidate" | "active" | "retired"; created_at: string; threshold: number;
   metrics: { dataset: { examples: number; feedback_examples?: number };
              test: { macro_f1: number; hybrid_macro_f1?: number; baseline_rules_macro_f1: number; coverage: number };
-             cross_validation?: { macro_f1_mean: number; macro_f1_std: number } };
+             cross_validation?: { macro_f1_mean: number; macro_f1_std: number };
+             external_eval?: { examples: number; hybrid_accuracy: number; rules_accuracy: number } };
 };
 
 export const api = {
@@ -125,6 +128,9 @@ export const api = {
   feedbackList: (status = "pending") => call<{ feedback: Feedback[] }>(`/learning/feedback?status=${status}`),
   reviewFeedback: (id: string, decision: "approve" | "reject") =>
     call(`/learning/feedback/${id}/review`, { method: "POST", body: JSON.stringify({ decision }) }),
+  identity: () => call<Identity>("/identity"),
+  putIdentity: (assistant_name: string, owner_name: string) =>
+    call<Identity>("/identity", { method: "PUT", body: JSON.stringify({ assistant_name, owner_name }) }),
   facts: (status?: string) => call<{ facts: Fact[] }>(`/memory/facts${status ? `?status=${status}` : ""}`),
   reviewFact: (id: string, decision: "confirm" | "reject", replace = false) =>
     call<{ status: string }>(`/memory/facts/${id}/review`, { method: "POST", body: JSON.stringify({ decision, replace }) }),

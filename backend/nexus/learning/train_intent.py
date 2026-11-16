@@ -36,6 +36,11 @@ def main(argv: list[str]) -> int:
     for label, c in t["per_class"].items():
         print(f"  {label:16} P {c['precision']:.2f}  R {c['recall']:.2f}  F1 {c['f1']:.2f}  n={c['support']}")
 
+    if ext := rep.get("external_eval"):
+        print(f"EXAMEN GALA ({ext['examples']} frases nunca vistas): híbrido {ext['hybrid_accuracy']:.0%} · "
+              f"solo modelo {ext['model_accuracy']:.0%} · solo reglas {ext['rules_accuracy']:.0%}")
+        for m in ext["misses"]:
+            print(f"  x {m['text']!r}: {m['label']} -> {m['predicted']}")
     print(f"registrado como candidato: {model_id}\nartefacto: {result.artifact_path}")
     if "--promote" in argv:
         with engine.begin() as c:

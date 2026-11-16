@@ -9,6 +9,7 @@ from nexus.learning import dataset, intent, registry
 
 BACKEND = Path(__file__).resolve().parents[2]
 SEED_PATH = BACKEND / "data" / "intent" / "intent_es_v1.jsonl"
+EXAM_PATH = BACKEND / "data" / "intent" / "eval_gala_v1.jsonl"  # examen externo: nunca se entrena con él
 _training = threading.Lock()  # una sesión de entrenamiento a la vez
 
 
@@ -29,7 +30,8 @@ def train_and_register(engine, seed_path: Path = SEED_PATH, include_feedback: bo
         if include_feedback:
             with engine.connect() as c:
                 ds = dataset.merge(ds, dataset.from_feedback(c))
-        result = intent.train(ds, models_dir(), encoder=encoder)
+        exam = dataset.load(EXAM_PATH) if EXAM_PATH.exists() else None
+        result = intent.train(ds, models_dir(), encoder=encoder, external=exam)
         with engine.begin() as c:
             model_id = registry.register(c, "intent_es", result)
         return model_id, result

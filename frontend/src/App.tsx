@@ -68,7 +68,7 @@ export default function App() {
       </nav>
 
       <main className="center">
-        <Chat key={chatKey} conversationId={active} onConversation={(id) => { setActive(id); refresh(); }} />
+        <Chat key={chatKey} conversationId={active} onConversation={(id) => { setActive(id); refresh(); }} onNew={() => open(null)} />
       </main>
 
       <aside className="rail" aria-label="Panel de control">

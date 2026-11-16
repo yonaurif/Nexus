@@ -46,6 +46,7 @@ const WARNINGS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^NO_EVIDENCE:knowledge$/, () => "Sin evidencia en tus documentos"],
   [/^NEEDS_INPUT$/, () => "Necesita más detalle"],
   [/^SECRET_DETECTED$/, () => "Contiene una credencial: no se guarda"],
+  [/^UNKNOWN_COMMAND$/, () => "Comando desconocido"],
   [/^PLAN_REJECTED:(\w+)/, (m) => `Plan descartado · ${m[1]}`],
   [/^CAPABILITY_UNAVAILABLE:(\w+)/, (m) => `Aún no disponible · ${m[1]}`],
   [/^(\w+):(\w+)$/, (m) => `Paso ${m[1]} · ${m[2]}`],

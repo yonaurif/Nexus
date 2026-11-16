@@ -193,3 +193,35 @@ def test_registry_versions_distinguish_the_variant(engine, trained, trained_enc)
         a, b = registry.register(c, "intent_es_test", trained), registry.register(c, "intent_es_test", trained_enc)
         va, vb = registry.get(c, a)["version"], registry.get(c, b)["version"]
     assert vb == va.replace("intent_es_v1:", "intent_es_v1+enc:")
+
+
+# --- Frases de los tests de GALA (Primitivo): mitad al entrenamiento, mitad como examen externo fijo ---
+EVAL = SEED.parent / "eval_gala_v1.jsonl"
+
+
+def test_project_tests_go_only_to_train_so_the_locked_test_does_not_move():
+    ds = dataset.load(SEED)
+    parts = dataset.split(ds.examples)
+    gala = {e.example_id for e in ds.examples if e.source_type == "project_tests"}
+    assert gala and gala <= {e.example_id for e in parts["train"]}
+    base = dataset.split([e for e in ds.examples if e.source_type != "project_tests"])
+    assert [e.example_id for e in parts["test"]] == [e.example_id for e in base["test"]]
+
+
+def test_external_exam_is_disjoint_and_reported(tmp_path):
+    exam = dataset.load(EVAL)
+    assert exam.rejected == [] and len(exam.examples) >= 20
+    assert not {e.text.lower() for e in exam.examples} & {e.text.lower() for e in dataset.load(SEED).examples}
+    r = intent.train(dataset.load(SEED), tmp_path, external=exam).report["external_eval"]
+    assert r["examples"] == len(exam.examples) and 0 <= r["hybrid_accuracy"] <= 1
+    assert all({"text", "label", "predicted"} <= set(m) for m in r["misses"])
+
+
+def test_retraining_the_same_dataset_never_overwrites_a_registered_artifact(tmp_path):
+    """Medido: el activo dejó de cargar (ARTIFACT_HASH_MISMATCH) porque otro entrenamiento con el mismo dataset
+    escribió el mismo nombre de archivo. Cada artefacto lleva su propio hash en el nombre."""
+    ds = dataset.load(SEED)
+    a, b = intent.train(ds, tmp_path), intent.train(ds, tmp_path)
+    assert intent.load(a.artifact_path, a.artifact_sha256) and Path(a.artifact_path).exists()
+    assert a.artifact_path != b.artifact_path or a.artifact_sha256 == b.artifact_sha256
+    assert a.artifact_sha256[7:19] in Path(a.artifact_path).name  # el nombre depende del contenido

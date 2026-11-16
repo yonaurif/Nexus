@@ -16,10 +16,10 @@ from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTP
 from fastapi.responses import FileResponse, StreamingResponse
 
 from nexus.config import env
-from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, FactReview, FeedbackIn, ChatRequest, CoreEvent, DocumentIn,
+from nexus.contracts import (ApprovalDecision, AssistantResponse, ChatAccepted, FactReview, FeedbackIn, IdentityIn, ChatRequest, CoreEvent, DocumentIn,
                              DocumentIngested, EpisodeView, FileIngested, FolderSourceIn, KnowledgeHit,
                              TaskView)
-from nexus.core import approvals, classifier, hardware, pipeline, task_store
+from nexus.core import approvals, classifier, hardware, identity, pipeline, task_store
 from nexus.core.state import TaskStatus as S
 from nexus.gateway import connectors, internal_tools
 from nexus.gateway.registry import SqlToolRegistry
@@ -281,6 +281,20 @@ def create_app(engine=None, model=None, api_token: str | None = None, adapters=N
         return {"episodes": [EpisodeView(**{k: getattr(r, k) for k in EpisodeView.model_fields}) for r in rows]}
 
     # --- Conectores y herramientas (Doc 05 §13) ---
+    @app.get("/api/v1/identity")
+    def get_identity(owner: str = Depends(auth)):
+        with engine.connect() as c:
+            return identity.get(c, owner)
+
+    @app.put("/api/v1/identity")
+    def put_identity(body: IdentityIn, owner: str = Depends(auth)):
+        """Doc 03 §3.5: solo el propietario autenticado; nunca desde el chat ni por inferencia."""
+        with engine.begin() as c:
+            out = identity.put(c, owner, body.assistant_name.strip(), body.owner_name.strip())
+            c.execute(sa.text("INSERT INTO audit_events (actor_type, actor_id, action, entity_type, entity_id) "
+                              "VALUES ('owner', :o, 'identity.updated', 'identity', :o)"), {"o": owner})
+        return out
+
     @app.get("/api/v1/memory/facts")
     def list_memory_facts(status: str | None = None, owner: str = Depends(auth)):
         with engine.connect() as c:

@@ -123,7 +123,20 @@ def _choose_threshold(proba, classes, y_true) -> tuple[float, float, float]:
     return best
 
 
-def train(ds: Dataset, out_dir: str | Path, encoder=None) -> TrainResult:
+def _external(pipe, threshold, exam: Dataset) -> dict:
+    """Examen externo fijo (frases de los tests de GALA nunca vistas en entrenamiento): mide si generaliza."""
+    from nexus.core.classifier import rules_classify
+    xs, ys = [e.text for e in exam.examples], [e.label for e in exam.examples]
+    classes, proba = list(pipe.classes_), pipe.predict_proba(xs)
+    model = [classes[row.argmax()] for row in proba]
+    hybrid = [m if row.max() >= threshold else rules_classify(x) for m, row, x in zip(model, proba, xs)]
+    acc = lambda pred: round(sum(p == y for p, y in zip(pred, ys)) / len(ys), 3)  # noqa: E731
+    return {"name": exam.manifest()["version"][:19], "examples": len(ys), "model_accuracy": acc(model),
+            "hybrid_accuracy": acc(hybrid), "rules_accuracy": acc([rules_classify(x) for x in xs]),
+            "misses": [{"text": x, "label": y, "predicted": h} for x, y, h in zip(xs, ys, hybrid) if h != y]}
+
+
+def train(ds: Dataset, out_dir: str | Path, encoder=None, external: Dataset | None = None) -> TrainResult:
     import joblib
     from nexus.core.classifier import rules_classify
 
@@ -160,13 +173,20 @@ def train(ds: Dataset, out_dir: str | Path, encoder=None) -> TrainResult:
         "cross_validation": _cv(xs["train"] + xs["validation"], ys["train"] + ys["validation"], encoder),
         "model": model_info,
     }
+    if external is not None and external.examples:
+        report["external_eval"] = _external(pipe, threshold, external)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     name = f"intent_es_v1{variant.replace('+', '-')}-{manifest['version'][7:19]}"
-    path = out / f"{name}.joblib"
-    joblib.dump({"pipeline": pipe, "threshold": threshold, "version": name}, path)
-    (out / f"{name}.report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    return TrainResult(str(path), _sha256(path), report)
+    # Nombre con el hash del contenido: un reentrenamiento con el mismo dataset no puede pisar el artefacto de
+    # un modelo registrado (medido: el activo dejó de cargar con ARTIFACT_HASH_MISMATCH).
+    tmp = out / f"{name}.joblib.tmp"
+    joblib.dump({"pipeline": pipe, "threshold": threshold, "version": name}, tmp)
+    sha = _sha256(tmp)
+    path = out / f"{name}-{sha[7:19]}.joblib"
+    tmp.replace(path)
+    path.with_suffix(".report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return TrainResult(str(path), sha, report)
 
 
 def _sha256(path: Path) -> str:

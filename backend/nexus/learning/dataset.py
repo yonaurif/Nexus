@@ -24,6 +24,8 @@ Label = Literal["conversation", "knowledge_query", "task_request", "agent_reques
                 "feedback", "rule_proposal", "system_admin"]
 SPLIT_SEED = 13
 SPLIT = {"validation": 0.15, "test": 0.2}
+# Siempre a train: validación y test quedan fijos (los del corpus base) para comparar versiones (TL §6.3).
+ALWAYS_TRAIN = {"owner_feedback", "project_tests"}
 
 
 class Example(Strict):
@@ -32,7 +34,8 @@ class Example(Strict):
     text: str = Field(min_length=1, max_length=2000)
     label: Label
     language: Literal["es"]
-    source_type: Literal["owner_feedback", "owner_written", "synthetic", "public_dataset"]
+    # project_tests: frases de los tests aprobados de GALA (Primitivo, proyecto del propietario)
+    source_type: Literal["owner_feedback", "owner_written", "synthetic", "public_dataset", "project_tests"]
     source_ref: str = Field(min_length=1, max_length=300)
     license_or_permission: str = Field(min_length=1, max_length=200)
     review_status: Literal["approved", "needs_review", "rejected"]
@@ -111,10 +114,10 @@ def split(examples: list[Example]) -> dict[str, list[Example]]:
     for e in sorted(examples, key=lambda x: x.example_id):
         by_label[e.label].append(e)
     out: dict[str, list[Example]] = {"train": [], "validation": [], "test": []}
-    # T5: las correcciones del propietario van SIEMPRE a train. Validación y test quedan fijos (los del
-    # corpus base) para que dos versiones del modelo se puedan comparar (TL §6.3 "test bloqueado").
-    out["train"] += [e for e in examples if e.source_type == "owner_feedback"]
-    by_label = {k: [e for e in v if e.source_type != "owner_feedback"] for k, v in by_label.items()}
+    # T5: las correcciones del propietario (y las frases de GALA) van SIEMPRE a train. Validación y test quedan
+    # fijos (los del corpus base) para que dos versiones del modelo se puedan comparar (TL §6.3 "test bloqueado").
+    out["train"] += [e for e in examples if e.source_type in ALWAYS_TRAIN]
+    by_label = {k: [e for e in v if e.source_type not in ALWAYS_TRAIN] for k, v in by_label.items()}
     rng = random.Random(SPLIT_SEED)
     for label in sorted(by_label):
         items = by_label[label][:]
